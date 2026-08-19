@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+*.spec
+
+# 临时测试产物
+_*.py
+*_test.png
+render_test.png
+final_test.png
+scene_preview.png
+toolbar_preview.png
+
+# 系统
+Thumbs.db
+desktop.ini
+.DS_Store
