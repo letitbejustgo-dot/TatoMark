@@ -10,7 +10,7 @@ Snipaste 风格的绿色选区与圆角药丸工具栏 · 全程 Pillow 抗锯�
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![deps](https://img.shields.io/badge/依赖-Pillow%20%2B%20tkinter-orange)
 
-<img src="assets/hero.png" width="760" alt="SnapMark 界面预览">
+<img src="assets/promo_banner.png" width="820" alt="SnapMark 截图标注小工具">
 
 </div>
 
@@ -37,6 +37,12 @@ SnapMark 是一个用 **Python + Pillow + tkinter** 写成的单文件截图标�
 - **⚡ 单实例常驻** — 全局快捷键唤起，重复启动自动转为「再截一张」，可设开机自启。
 
 <div align="center">
+<img src="assets/hero.png" width="720" alt="标注实战：框选 + 高亮 + 箭头 + 文字批注"><br>
+<sub>框选 + 高亮 + 彗星箭头 + 文字批注</sub>
+<br><br>
+<img src="assets/promo_mosaic.png" width="720" alt="隐私打码：敏感信息一键马赛克"><br>
+<sub>方形 / 圆形马赛克笔刷，敏感信息一键打码</sub>
+<br><br>
 <img src="assets/preview_new.png" width="620" alt="工具栏与字体预览"><br>
 <sub>统一线性图标 · 平滑药丸工具栏 · 中英混排标注字体</sub>
 </div>
