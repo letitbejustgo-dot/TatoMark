@@ -42,8 +42,92 @@ except Exception:
     except Exception:
         pass
 
-CN_FONT_PATH = "C:/Windows/Fonts/msyh.ttc"
+CN_FONT_PATH = "C:/Windows/Fonts/msyh.ttc"          # UI 文案（提示/尺寸/toast）
 CN_FONT_FAMILY = "Microsoft YaHei"
+
+# 截图标注「文字」工具：中文用「黄令东齐伋体」，英文/数字用「California FB」
+# 中文字体随项目内置（无需系统安装，私有注册）；California FB 为系统自带。
+import os as _os
+_FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts")
+CN_TEXT_FONT_PATH = _os.path.join(_FONT_DIR, "QijiFallback.ttf")   # 黄令东齐伋体
+CN_TEXT_FONT_FAMILY = "QIJIFALLBACK"
+EN_TEXT_FONT_PATH = "C:/Windows/Fonts/CALIFR.TTF"                  # Californian FB
+EN_TEXT_FONT_FAMILY = "Californian FB"
+# tkinter 实时输入/预览用单一族名（中文为主，拉丁字符由 Tk 自动回退）
+TEXT_FONT_FAMILY = CN_TEXT_FONT_FAMILY
+_CN_FONT_CACHE = {}
+_EN_FONT_CACHE = {}
+
+
+def register_text_font():
+    """把内置中文字体私有注册进当前进程，使 tkinter 也能按族名渲染（无需管理员）。"""
+    try:
+        ctypes.windll.gdi32.AddFontResourceExW(
+            ctypes.c_wchar_p(CN_TEXT_FONT_PATH), 0x10, 0)
+    except Exception as ex:
+        print("字体注册失败（将回退系统字体）：", ex)
+
+
+def _load_font(cache, path, size):
+    fnt = cache.get(size)
+    if fnt is None:
+        try:
+            fnt = ImageFont.truetype(path, size)
+        except Exception:
+            try:
+                fnt = ImageFont.truetype(CN_FONT_PATH, size)
+            except Exception:
+                fnt = ImageFont.load_default()
+        cache[size] = fnt
+    return fnt
+
+
+def get_cn_font(size):
+    return _load_font(_CN_FONT_CACHE, CN_TEXT_FONT_PATH, size)
+
+
+def get_en_font(size):
+    return _load_font(_EN_FONT_CACHE, EN_TEXT_FONT_PATH, size)
+
+
+def _is_latin(ch):
+    """ASCII 拉丁字符（含数字/标点/空格）→ 英文字体；其余（中文等）→ 中文字体。"""
+    return ch.isascii()
+
+
+def _line_width(line, cn, en):
+    return sum((en if _is_latin(ch) else cn).getlength(ch) for ch in line)
+
+
+def measure_mixed(text, size):
+    """中英混排 / 多行 测量：返回 (宽, 高, 单行行高 lineh, 基线上高 ascent)。"""
+    if text == "":
+        text = " "
+    cn, en = get_cn_font(size), get_en_font(size)
+    ca, ea = cn.getmetrics(), en.getmetrics()
+    ascent = max(ca[0], ea[0])
+    lineh = ascent + max(ca[1], ea[1])
+    lines = text.split("\n")
+    w = max((_line_width(ln or " ", cn, en) for ln in lines), default=1.0)
+    return int(round(w)), lineh * len(lines), lineh, ascent
+
+
+def draw_mixed(draw, x, y, text, fill, size):
+    """中英混排 / 多行 绘制：(x, y) 为左上角，逐字符按语言选字体、对齐基线。"""
+    cn, en = get_cn_font(size), get_en_font(size)
+    ca, ea = cn.getmetrics(), en.getmetrics()
+    ascent = max(ca[0], ea[0])
+    lineh = ascent + max(ca[1], ea[1])
+    for i, line in enumerate(text.split("\n")):
+        cx = x
+        baseline = y + ascent + i * lineh
+        for ch in line:
+            f = en if _is_latin(ch) else cn
+            draw.text((cx, baseline), ch, fill=fill, font=f, anchor="ls")
+            cx += f.getlength(ch)
+
+
+register_text_font()
 
 ACCENT = "#13C060"
 ICON = "#41464B"
@@ -51,7 +135,8 @@ RED = "#F5453A"
 PILL_BG = "#FFFFFF"
 
 PRESET_COLORS = ["#3B9EFF", "#5FCE3B", "#FFB020", "#3A3F44", "#FFFFFF", "#FF5B5B"]
-LEVELS = [(3, 20), (6, 30), (11, 44)]   # (线宽, 字号)
+LEVELS = [(2, 18), (6, 34), (14, 58)]   # (线宽, 字号) —— 三档差距加大
+MOSAIC_BRUSH = [18, 34, 56]             # 马赛克笔刷直径（三档）
 SS = 4                                   # 图标超采样
 
 PINS = []
@@ -251,6 +336,90 @@ def render_comet_ss(x0, y0, x1, y1, w, color, ss):
     return img.rotate(-ang, resample=Image.BICUBIC, expand=True)
 
 
+def render_comet_curve(p0, p1, p2, w, color, ss):
+    """可弯折的彗星箭头：沿二次贝塞尔(p0→p2，控制点 p1)绘制，
+    尾细透明→头浓，末端三角箭头。返回 (ss 分辨率 RGBA 图, 左上x, 左上y)。
+    当 p1 = (p0+p2)/2 时即为直线箭头，外观与直箭头一致。"""
+    N = 56
+    pts = []
+    for i in range(N + 1):
+        t = i / N
+        mt = 1 - t
+        x = mt * mt * p0[0] + 2 * mt * t * p1[0] + t * t * p2[0]
+        y = mt * mt * p0[1] + 2 * mt * t * p1[1] + t * t * p2[1]
+        pts.append((x, y))
+    neck_w = max(1.2, 0.9 * w)
+    head_w = 5 + 1.9 * w
+    seg = [math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+           for i in range(N)]
+    total = sum(seg) or 1.0
+    head_len = min(total * 0.5, 10 + 3.0 * w)
+    cum = [0.0]
+    for s_ in seg:
+        cum.append(cum[-1] + s_)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    maxr = max(head_w, neck_w)
+    pad = int(maxr) + 4
+    minx, miny = min(xs) - pad, min(ys) - pad
+    W = int(max(xs) - min(xs)) + 2 * pad
+    H = int(max(ys) - min(ys)) + 2 * pad
+    Wss, Hss = max(1, int(W * ss)), max(1, int(H * ss))
+    grad = Image.new("L", (Wss, Hss), 0)
+    gd = ImageDraw.Draw(grad)
+
+    def LP(p):
+        return ((p[0] - minx) * ss, (p[1] - miny) * ss)
+
+    # 找到颈部（彗尾结束处，约在凹口深度），其后交给箭头头部
+    head_shaft = head_len * 0.62
+    neck_i = N
+    acc = 0.0
+    for i in range(N - 1, -1, -1):
+        acc += seg[i]
+        if acc >= head_shaft:
+            neck_i = i
+            break
+
+    def normal(i):
+        a = pts[max(0, i - 1)]
+        b = pts[min(N, i + 1)]
+        tx, ty = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(tx, ty) or 1.0
+        return (-ty / L, tx / L)
+
+    # 平滑彗尾：沿曲线两侧偏移出连续变宽的带状，逐段四边形填充（无颗粒感）
+    Lp, Rp = [], []
+    for i in range(N + 1):
+        s = cum[i] / total
+        hw = neck_w * (s ** 0.72)
+        nx_, ny_ = normal(i)
+        Lp.append((pts[i][0] + nx_ * hw, pts[i][1] + ny_ * hw))
+        Rp.append((pts[i][0] - nx_ * hw, pts[i][1] - ny_ * hw))
+    for i in range(neck_i):
+        s = cum[i + 1] / total
+        alpha = int(255 * (0.10 + 0.90 * s))     # 升序绘制：头端 alpha 覆盖重叠处
+        gd.polygon([LP(Lp[i]), LP(Lp[i + 1]), LP(Rp[i + 1]), LP(Rp[i])],
+                   fill=alpha)
+    # 带倒刺的箭头头部（似中国古箭）：尖端 + 两侧后掠倒刺 + 前凹的后端凹口。
+    # 关键：后端凹口 = 彗尾的实际终点 pts[neck_i]（保证与尾巴严丝合缝，
+    # 任何弯折都不脱节）；方向取「凹口→尖端」的弦向，稳定贴合曲线。
+    tip = pts[N]
+    Pn = pts[neck_i]                          # 彗尾终点，即箭头后端凹口
+    dx, dy = tip[0] - Pn[0], tip[1] - Pn[1]
+    Ln = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / Ln, dy / Ln
+    pxp, pyp = -uy, ux
+    barbBase = (tip[0] - ux * head_len, tip[1] - uy * head_len)   # 倒刺基准(尖端后 head_len)
+    barbL = (barbBase[0] + pxp * head_w, barbBase[1] + pyp * head_w)
+    barbR = (barbBase[0] - pxp * head_w, barbBase[1] - pyp * head_w)
+    gd.polygon([LP(barbL), LP(tip), LP(barbR), LP(Pn)], fill=255)
+    cr, cg, cb = _hex(color)
+    img = Image.new("RGBA", (Wss, Hss), (cr, cg, cb, 255))
+    img.putalpha(grad)
+    return img, int(minx), int(miny)
+
+
 def arrow_polygon(x0, y0, x1, y1, w):
     """实心渐细箭头：尾细→颈渐宽→大三角头。"""
     dx, dy = x1 - x0, y1 - y0
@@ -277,14 +446,52 @@ def arrow_polygon(x0, y0, x1, y1, w):
 _ICON_CACHE = {}
 
 
+def _smooth_resize(im, size):
+    """预乘 alpha 后再 LANCZOS 缩小，消除透明边缘的暗色毛边（真正的抗锯齿）。"""
+    try:
+        import numpy as np
+        a = np.asarray(im.convert("RGBA")).astype(np.float32)
+        al = a[..., 3:4] / 255.0
+        a[..., :3] *= al                       # 预乘
+        pm = Image.fromarray(a.astype("uint8"), "RGBA").resize(size, Image.LANCZOS)
+        b = np.asarray(pm).astype(np.float32)
+        al2 = np.clip(b[..., 3:4], 1.0, 255.0) / 255.0
+        b[..., :3] = np.clip(b[..., :3] / al2, 0, 255)   # 反预乘
+        return Image.fromarray(b.astype("uint8"), "RGBA")
+    except Exception:
+        return im.resize(size, Image.LANCZOS)
+
+
+# 工具/动作 → icon 文件夹内的 PNG 文件名
+_ICON_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "icon")
+_ICON_FILE = {
+    "rect": "直方框.png", "rrect": "圆角方框.png", "ellipse": "圆圈.png",
+    "arrow": "长箭头-右上.png", "mosaic": "马赛克.png", "text": "文本块.png",
+    "undo": "撤销.png", "save": "下载.png", "close": "取消.png",
+    "confirm": "确定.png", "edit": "可编辑.png", "rotate": "顺时针方向.png",
+}
+_ICON_SRC_CACHE = {}
+
+
+def _load_icon_src(name):
+    """加载并裁剪到内容边界的原始 PNG 图标（缓存）。"""
+    im = _ICON_SRC_CACHE.get(name)
+    if im is None:
+        im = Image.open(_os.path.join(_ICON_DIR, _ICON_FILE[name])).convert("RGBA")
+        bbox = im.getbbox()
+        if bbox:
+            im = im.crop(bbox)
+        _ICON_SRC_CACHE[name] = im
+    return im
+
+
 def render_icon(name, px=32, state="normal"):
+    """从 icon 文件夹加载 PNG，统一裁剪、居中、按比例平滑缩放到按钮尺寸。"""
     key = (name, px, state)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
-    color = {"close": RED, "confirm": ACCENT}.get(name, ICON)
-    col = _hex(color)
     S = px * SS
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    im = Image.new("RGBA", (S, S), (255, 255, 255, 0))
     d = ImageDraw.Draw(im)
 
     if state == "hover":
@@ -294,97 +501,47 @@ def render_icon(name, px=32, state="normal"):
         d.rounded_rectangle([2 * SS, 2 * SS, (px - 2) * SS, (px - 2) * SS],
                             radius=8 * SS, fill=(225, 246, 234, 255))
 
-    def s(v):
-        return v * SS
+    # 统一视觉尺寸：把裁剪后的图标按比例塞进居中的目标框
+    target = 20 * SS                       # 32px 按钮内约 20px 图标
+    src = _load_icon_src(name)
+    sw, sh = src.size
+    k = target / float(max(sw, sh))
+    gw, gh = max(1, int(round(sw * k))), max(1, int(round(sh * k)))
+    glyph = _smooth_resize(src, (gw, gh))
+    im.alpha_composite(glyph, ((S - gw) // 2, (S - gh) // 2))
 
-    w = 2.3 * SS
-
-    def poly(pts, width=w, c=col):
-        p = [(s(x), s(y)) for x, y in pts]
-        d.line(p, fill=c, width=int(round(width)), joint="curve")
-        r = width / 2
-        for x, y in p:
-            d.ellipse([x - r, y - r, x + r, y + r], fill=c)
-
-    if name == "rect":
-        d.rounded_rectangle([s(8), s(9), s(24), s(23)], radius=s(3),
-                            outline=col, width=int(w))
-    elif name == "ellipse":
-        d.ellipse([s(8), s(8), s(24), s(24)], outline=col, width=int(w))
-    elif name == "arrow":
-        d.polygon([(s(x), s(y)) for x, y in arrow_polygon(9, 23, 23, 9, 2.4)],
-                  fill=col)
-    elif name == "pen":
-        tail, tip = (8.5, 23.5), (24, 8)
-        dx, dy = tip[0] - tail[0], tip[1] - tail[1]
-        L = math.hypot(dx, dy)
-        ux, uy = dx / L, dy / L
-        px_, py_ = -uy, ux
-        hw, nib = 2.7, 5.0
-        neck = (tip[0] - ux * nib, tip[1] - uy * nib)
-        shaft = [(tail[0] + px_ * hw, tail[1] + py_ * hw),
-                 (neck[0] + px_ * hw, neck[1] + py_ * hw),
-                 (neck[0] - px_ * hw, neck[1] - py_ * hw),
-                 (tail[0] - px_ * hw, tail[1] - py_ * hw)]
-        d.polygon([(s(x), s(y)) for x, y in shaft], fill=col)
-        d.polygon([(s(neck[0] + px_ * hw), s(neck[1] + py_ * hw)),
-                   (s(tip[0]), s(tip[1])),
-                   (s(neck[0] - px_ * hw), s(neck[1] - py_ * hw))], fill=col)
-    elif name == "mosaic":
-        cells = [(0, 0), (2, 0), (1, 1), (3, 1), (0, 2), (2, 2), (1, 3), (3, 3)]
-        c, base = 3.6, 9.2
-        for i, j in cells:
-            x, y = base + i * c, base + j * c
-            d.rectangle([s(x), s(y), s(x + c), s(y + c)], fill=col)
-    elif name == "text":
-        poly([(9, 10), (23, 10)])
-        poly([(16, 10), (16, 23)])
-    elif name == "undo":
-        d.arc([s(9), s(10), s(24), s(25)], start=110, end=430, fill=col,
-              width=int(w))
-        cx, cy, rr = 16.5, 17.5, 7.5
-        a = math.radians(110)
-        ex, ey = cx + rr * math.cos(a), cy + rr * math.sin(a)
-        poly([(ex - 3, ey - 1), (ex, ey), (ex + 1, ey - 3.2)], width=2.1 * SS)
-    elif name == "save":
-        poly([(16, 7), (16, 17.5)])
-        d.polygon([(s(16), s(19)), (s(12.5), s(14.5)), (s(19.5), s(14.5))],
-                  fill=col)
-        poly([(8, 17), (8, 24), (24, 24), (24, 17)])
-    elif name == "close":
-        poly([(10, 10), (22, 22)], width=2.6 * SS)
-        poly([(22, 10), (10, 22)], width=2.6 * SS)
-    elif name == "confirm":
-        poly([(9, 17), (14.5, 22.5), (24, 9)], width=2.8 * SS)
-
-    out = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+    out = ImageTk.PhotoImage(_smooth_resize(im, (px, px)))
     _ICON_CACHE[key] = out
     return out
 
 
 def render_swatch(color, selected, px=24):
+    """颜色色块：圆角方块（与粗细档位的圆点区分）。"""
     S = px * SS
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    im = Image.new("RGBA", (S, S), (255, 255, 255, 0))
     d = ImageDraw.Draw(im)
     outline = (204, 204, 204) if color == "#FFFFFF" else _hex(color)
-    d.ellipse([4 * SS, 4 * SS, (px - 4) * SS, (px - 4) * SS], fill=_hex(color),
-              outline=outline, width=SS)
+    d.rounded_rectangle([4 * SS, 4 * SS, (px - 4) * SS, (px - 4) * SS],
+                        radius=int(3.2 * SS), fill=_hex(color),
+                        outline=outline, width=SS)
     if selected:
-        d.ellipse([1 * SS, 1 * SS, (px - 1) * SS, (px - 1) * SS],
-                  outline=_hex(ACCENT), width=2 * SS)
-    return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+        d.rounded_rectangle([1 * SS, 1 * SS, (px - 1) * SS, (px - 1) * SS],
+                            radius=int(5 * SS), outline=_hex(ACCENT),
+                            width=2 * SS)
+    return ImageTk.PhotoImage(_smooth_resize(im, (px, px)))
 
 
-def render_level(idx, active, px=26):
+def render_level(idx, active, px=28):
+    """粗细档位圆点：三档半径差距加大，更易区分。"""
     S = px * SS
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    im = Image.new("RGBA", (S, S), (255, 255, 255, 0))
     d = ImageDraw.Draw(im)
-    rr = [3, 5, 7][idx]
-    c = _hex(ACCENT) if active else (183, 188, 194)
+    rr = [2.5, 6, 10.5][idx]
+    c = _hex(ACCENT) if active else (176, 182, 189)
     cx = px / 2
     d.ellipse([(cx - rr) * SS, (cx - rr) * SS, (cx + rr) * SS, (cx + rr) * SS],
               fill=c)
-    return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+    return ImageTk.PhotoImage(_smooth_resize(im, (px, px)))
 
 
 def render_plus(px=24):
@@ -398,57 +555,59 @@ def render_plus(px=24):
            fill=(120, 120, 120), width=SS)
     d.line([cx * SS, (cx - 4) * SS, cx * SS, (cx + 4) * SS],
            fill=(120, 120, 120), width=SS)
-    return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+    return ImageTk.PhotoImage(_smooth_resize(im, (px, px)))
+
+
+def render_badge(icon_name, px=22):
+    """白底圆形徽标 + 居中图标（用于文字编辑铅笔、箭头旋转手柄等）。"""
+    S = px * SS
+    im = Image.new("RGBA", (S, S), (255, 255, 255, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse([SS, SS, (px - 1) * SS, (px - 1) * SS], fill=(255, 255, 255, 255),
+              outline=_hex(ACCENT), width=int(1.4 * SS))
+    src = _load_icon_src(icon_name)
+    box = int((px - 8) * SS)
+    sw, sh = src.size
+    k = box / float(max(sw, sh))
+    gw, gh = max(1, int(sw * k)), max(1, int(sh * k))
+    glyph = _smooth_resize(src, (gw, gh))
+    im.alpha_composite(glyph, ((S - gw) // 2, (S - gh) // 2))
+    return ImageTk.PhotoImage(_smooth_resize(im, (px, px)))
 
 
 def render_pencil(px=22):
-    """文字右上角的铅笔按钮：白底圆 + 绿色铅笔。"""
-    S = px * SS
-    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(im)
-    d.ellipse([SS, SS, (px - 1) * SS, (px - 1) * SS], fill=(255, 255, 255, 255),
-              outline=_hex(ACCENT), width=int(1.6 * SS))
-    col = _hex(ACCENT)
-
-    def s(v):
-        return v * SS
-
-    tail, tip = (6.8, 14.5), (14.5, 6.8)
-    dx, dy = tip[0] - tail[0], tip[1] - tail[1]
-    L = math.hypot(dx, dy)
-    ux, uy = dx / L, dy / L
-    px_, py_ = -uy, ux
-    hw, nib = 1.9, 3.4
-    neck = (tip[0] - ux * nib, tip[1] - uy * nib)
-    shaft = [(tail[0] + px_ * hw, tail[1] + py_ * hw),
-             (neck[0] + px_ * hw, neck[1] + py_ * hw),
-             (neck[0] - px_ * hw, neck[1] - py_ * hw),
-             (tail[0] - px_ * hw, tail[1] - py_ * hw)]
-    d.polygon([(s(x), s(y)) for x, y in shaft], fill=col)
-    d.polygon([(s(neck[0] + px_ * hw), s(neck[1] + py_ * hw)),
-               (s(tip[0]), s(tip[1])),
-               (s(neck[0] - px_ * hw), s(neck[1] - py_ * hw))], fill=col)
-    return ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+    return render_badge("edit", px)
 
 
 def render_pill(w, h, seps):
-    """圆角白色药丸 + 柔和阴影，返回 (PhotoImage, margin)。"""
+    """圆角白色药丸 + 柔和阴影，返回 (PhotoImage, margin)。
+    药丸主体与分隔线以 SS 倍超采样绘制后再缩小，边缘平滑无锯齿。"""
     M = 16
     W, Hh = w + 2 * M, h + 2 * M
+
+    # 阴影：模糊后本身即平滑，1x 绘制即可
     shadow = Image.new("RGBA", (W, Hh), (0, 0, 0, 0))
     ds = ImageDraw.Draw(shadow)
     ds.rounded_rectangle([M, M + 3, M + w, M + h + 3], radius=h // 2,
                          fill=(0, 0, 0, 55))
     shadow = shadow.filter(ImageFilter.GaussianBlur(7))
-    base = Image.new("RGBA", (W, Hh), (0, 0, 0, 0))
-    base = Image.alpha_composite(base, shadow)
-    d = ImageDraw.Draw(base)
-    d.rounded_rectangle([M, M, M + w, M + h], radius=h // 2,
-                        fill=(255, 255, 255, 255), outline=(228, 230, 234, 255),
-                        width=1)
+    base = Image.alpha_composite(Image.new("RGBA", (W, Hh), (0, 0, 0, 0)),
+                                 shadow)
+
+    # 药丸主体 + 分隔线：超采样绘制 → LANCZOS 缩小，抗锯齿
+    # 关键：透明底的 RGB 预置为白色，避免缩小时白色药丸与黑色透明像素
+    # 插值产生灰色毛边（此前「外围椭圆圈锯齿」的真正成因）。
+    ss = SS
+    big = Image.new("RGBA", (W * ss, Hh * ss), (255, 255, 255, 0))
+    db = ImageDraw.Draw(big)
+    db.rounded_rectangle([M * ss, M * ss, (M + w) * ss, (M + h) * ss],
+                         radius=(h // 2) * ss, fill=(255, 255, 255, 255),
+                         outline=(228, 230, 234, 255), width=ss)
     for cx in seps:
-        d.line([M + cx, M + 10, M + cx, M + h - 10], fill=(224, 227, 231, 255),
-               width=1)
+        db.line([(M + cx) * ss, (M + 10) * ss, (M + cx) * ss, (M + h - 10) * ss],
+                fill=(224, 227, 231, 255), width=ss)
+    big = big.resize((W, Hh), Image.LANCZOS)
+    base = Image.alpha_composite(base, big)
     return ImageTk.PhotoImage(base), M
 
 
@@ -515,6 +674,18 @@ class ScreenshotTool:
             self.start_capture()
         self.root.after(80, self._poll_trigger)
 
+    def _poll_keys(self):
+        """overrideredirect 覆盖窗常拿不到键盘焦点，直接轮询 Esc 键保证可退出。"""
+        if not self.active or self.overlay is None:
+            return
+        try:
+            if ctypes.windll.user32.GetAsyncKeyState(0x1B) & 0x8000:
+                self.cancel()
+                return
+        except Exception:
+            pass
+        self.root.after(60, self._poll_keys)
+
     # ---------------- 截图 ----------------
     def start_capture(self):
         if self.active:
@@ -556,10 +727,16 @@ class ScreenshotTool:
         self.active_handle = None
         self.temp_item = None
         self.pen_points = None
+        self._mosaic_stamps = None
+        self._ov_photo = None
+        self._pencil_img = None
+        self._rotate_img = None
+        self.mosaic_shape = "rect"
         self.text_entry = None
         self.tool = None
         self.annotations = []
         self.hover_anno_idx = None
+        self.selected_idx = None
         self.move_idx = None
         self._move_photo = None
         self._tb_widgets = []
@@ -570,21 +747,29 @@ class ScreenshotTool:
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Motion>", self.on_hover)
         self.canvas.bind("<Double-Button-1>", self.on_double)
-        self.overlay.bind("<Escape>", lambda e: self.cancel())
-        self.overlay.bind("<Control-z>", lambda e: self.undo())
-        self.overlay.bind("<Control-c>", lambda e: self.do_copy())
-        self.overlay.bind("<Control-s>", lambda e: self.do_save())
+        # bind_all + 逐控件绑定，双保险保证 Esc/快捷键在任意焦点下都能触发
+        for tgt in (self.overlay.bind_all, self.overlay.bind, self.canvas.bind):
+            tgt("<Escape>", lambda e: self.cancel())
+            tgt("<Control-z>", lambda e: self.undo())
+            tgt("<Control-c>", lambda e: self.do_copy())
+            tgt("<Control-s>", lambda e: self.do_save())
         self.overlay.focus_force()
         self.canvas.focus_set()
+        self.root.after(60, self._poll_keys)      # Esc 轮询兜底
 
+        self.pick_hex = None
+        self._mag_photo = None
         self.hint = self.canvas.create_text(
-            self.vw // 2, 34, text="拖动鼠标框选区域        Esc 取消",
+            self.vw // 2, 34,
+            text="拖动鼠标框选区域    ·    移动十字放大镜取色，双击 / Ctrl+C 复制色值"
+                 "    ·    Esc 取消",
             fill="#EEEEEE", font=(CN_FONT_FAMILY, -17))
 
     # ---------------- 选区阶段 ----------------
     def on_press(self, e):
         if self.mode == "select":
             self.start_pt = (e.x, e.y)
+            self.canvas.delete("mag")
         else:
             self.edit_press(e)
 
@@ -623,11 +808,14 @@ class ScreenshotTool:
         l, t = min(x0, e.x), min(y0, e.y)
         r, b = max(x0, e.x), max(y0, e.y)
         if r - l < 8 or b - t < 8:
+            # 视为一次点击（非框选）：复位以便放大镜取色继续工作
+            self.start_pt = None
             return
         self.sel = [l, t, r, b]
         self.mode = "edit"
         self.canvas.delete(self.hint)
         self.canvas.delete("sel")
+        self.canvas.delete("mag")
         self.build_toolbar()
         self.redraw_static()
 
@@ -655,12 +843,24 @@ class ScreenshotTool:
 
     # ---------------- 标注命中 ----------------
     def _text_size(self, text, fs):
-        f = tkfont.Font(family=CN_FONT_FAMILY, size=-fs)
-        return f.measure(text or " "), f.metrics("linespace")
+        # 与最终 Pillow 混排渲染一致的测量（中文齐伋体 + 英文 California FB）
+        w, h, _lh, _asc = measure_mixed(text or " ", fs)
+        return w, h
+
+    def _rrect_radius(self, x0, y0, x1, y1):
+        """圆角方框的圆角半径：随尺寸自适应并封顶。"""
+        m = min(abs(x1 - x0), abs(y1 - y0))
+        return max(4.0, min(m * 0.22, 32.0, m / 2.0))
 
     def _anno_bbox(self, a):
         t = a["type"]
-        if t in ("rect", "ellipse", "mosaic", "arrow"):
+        if t == "mosaic":
+            r = a.get("brush", 20) / 2.0
+            xs = [s[0] for s in a["stamps"]]
+            ys = [s[1] for s in a["stamps"]]
+            return (min(xs) - r, min(ys) - r, max(xs) + r, max(ys) + r)
+        if t in ("rect", "rrect", "ellipse", "arrow"):
+            # 箭头方框只由两端点决定，弯折控制点不改变方框大小
             x0, y0, x1, y1 = a["coords"]
             return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
         if t == "pen":
@@ -674,9 +874,17 @@ class ScreenshotTool:
 
     def _anno_at(self, x, y, pad=5):
         for i in range(len(self.annotations) - 1, -1, -1):
-            bx0, by0, bx1, by1 = self._anno_bbox(self.annotations[i])
+            a = self.annotations[i]
+            if a["type"] == "mosaic":
+                continue                      # 马赛克不参与悬停/移动
+            bx0, by0, bx1, by1 = self._anno_bbox(a)
             if bx0 - pad <= x <= bx1 + pad and by0 - pad <= y <= by1 + pad:
                 return i
+            # 箭头的弯折控制点可能被拖到方框外，仍应可命中以便再次调整
+            if a["type"] == "arrow":
+                dx, dy = self._arrow_dot(a)
+                if (x - dx) ** 2 + (y - dy) ** 2 <= 144:
+                    return i
         return None
 
     def _in_pencil(self, x, y, idx):
@@ -698,24 +906,161 @@ class ScreenshotTool:
         self.canvas.create_image(bx1, by0, image=self._pencil_img,
                                  tags="editbtn")
 
+    def _extend_hover(self, x, y, idx):
+        """当鼠标落在已悬停要素的外部把手（铅笔/旋转/弯折点）上时，保持该要素。"""
+        h = self.hover_anno_idx
+        if idx is None and h is not None and h < len(self.annotations):
+            if (self._in_pencil(x, y, h) or self._in_rotate_handle(x, y, h)
+                    or self._in_arrow_dot(x, y, h)):
+                return h
+        return idx
+
+    def _arrow_dot(self, a):
+        """箭头结构中心（曲线中点 B(0.5)），即拖动控制点在曲线上的落点。"""
+        x0, y0, x1, y1 = a["coords"]
+        cx, cy = a.get("ctrl") or ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        return (0.25 * x0 + 0.5 * cx + 0.25 * x1,
+                0.25 * y0 + 0.5 * cy + 0.25 * y1)
+
+    def _in_arrow_dot(self, x, y, idx):
+        a = self.annotations[idx]
+        if a["type"] != "arrow":
+            return False
+        dx, dy = self._arrow_dot(a)
+        return (x - dx) ** 2 + (y - dy) ** 2 <= 100      # 半径 10 命中
+
+    def _rotate_handle_pos(self, idx):
+        bx0, by0, bx1, by1 = self._anno_bbox(self.annotations[idx])
+        return (bx1, by0)                                # 方框右上角
+
+    def _in_rotate_handle(self, x, y, idx):
+        if self.annotations[idx]["type"] != "arrow":
+            return False
+        hx, hy = self._rotate_handle_pos(idx)
+        return (x - hx) ** 2 + (y - hy) ** 2 <= 144      # 半径 12 命中
+
+    def _draw_move_box(self, idx):
+        """可移动状态：四边虚线框 + 8 个节点方框，标示当前要移动的要素。
+        非文字要素（只能移动不能编辑）用灰色；虚线贴在要素线条中心而非外围。"""
+        self.canvas.delete("movebox")
+        if idx is None or idx >= len(self.annotations):
+            return
+        a = self.annotations[idx]
+        editable = (a["type"] == "text")
+        col = ACCENT if editable else "#9AA0A6"       # 文字绿色，其余灰色
+        bx0, by0, bx1, by1 = self._anno_bbox(a)       # 形状 bbox = 线条中心线
+        # 细长的「长划 + 点」虚线（dash-dot），比例更精致
+        self.canvas.create_rectangle(bx0, by0, bx1, by1, outline=col,
+                                     width=2, dash=(16, 5, 2, 5), tags="movebox")
+        nsz = 3.0                                             # 圆形节点半径,小巧
+        mx, my = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+        for nx, ny in [(bx0, by0), (mx, by0), (bx1, by0), (bx1, my),
+                       (bx1, by1), (mx, by1), (bx0, by1), (bx0, my)]:
+            self.canvas.create_oval(nx - nsz, ny - nsz, nx + nsz, ny + nsz,
+                                    fill="white", outline=col,
+                                    width=1, tags="movebox")
+        if a["type"] == "arrow":
+            # 结构中心实心圆点：在方框内拖动它即可改变箭头弯折形状
+            dx, dy = self._arrow_dot(a)
+            self.canvas.create_oval(dx - 5, dy - 5, dx + 5, dy + 5,
+                                    fill=ACCENT, outline="white", width=1,
+                                    tags="movebox")
+            # 右上角旋转手柄（顺时针方向.png）：拖动可整体旋转箭头方位
+            if not hasattr(self, "_rotate_img") or self._rotate_img is None:
+                self._rotate_img = render_badge("rotate", 22)
+            hx, hy = self._rotate_handle_pos(idx)
+            self.canvas.create_image(hx, hy, image=self._rotate_img,
+                                     tags="movebox")
+        self.canvas.tag_raise("editbtn")
+
+    # ---------------- 取色放大镜（选区阶段）----------------
+    def _pick_color_at(self, x, y):
+        x = min(max(int(x), 0), self.vw - 1)
+        y = min(max(int(y), 0), self.vh - 1)
+        return self.full_img.getpixel((x, y))[:3]
+
+    def _update_magnifier(self, x, y):
+        self.canvas.delete("mag")
+        Z, half = 9, 8                       # 放大倍数 / 采样半径
+        n = 2 * half + 1
+        D = n * Z
+        reg = Image.new("RGB", (n, n), (20, 20, 20))
+        cl, ct = max(0, x - half), max(0, y - half)
+        cr, cb = min(self.vw, x - half + n), min(self.vh, y - half + n)
+        if cr > cl and cb > ct:
+            reg.paste(self.full_img.crop((cl, ct, cr, cb)),
+                      (cl - (x - half), ct - (y - half)))
+        disp = reg.resize((D, D), Image.NEAREST)
+        d = ImageDraw.Draw(disp)
+        mid = half * Z
+        GREEN = (19, 192, 96)
+        # 绿色十字虚线准星（与大多数背景色可区分）+ 中心像素高亮
+        cxl = mid + Z // 2
+        for a0 in range(0, D, 6):                      # 虚线
+            d.line([cxl, a0, cxl, min(a0 + 3, D)], fill=GREEN, width=1)
+            d.line([a0, cxl, min(a0 + 3, D), cxl], fill=GREEN, width=1)
+        d.rectangle([mid, mid, mid + Z - 1, mid + Z - 1], outline=GREEN, width=2)
+        d.rectangle([0, 0, D - 1, D - 1], outline=(255, 255, 255), width=2)
+        d.rectangle([1, 1, D - 2, D - 2], outline=(40, 40, 40), width=1)
+        # 信息面板（浅色底）：两行黑字色号（HEX / RGB）+ 一行灰字提示
+        rgb = self._pick_color_at(x, y)
+        hexs = "#%02X%02X%02X" % rgb
+        self.pick_hex = hexs
+        panelH = 62
+        full = Image.new("RGB", (D, D + panelH), (245, 246, 248))
+        full.paste(disp, (0, 0))
+        pd = ImageDraw.Draw(full)
+        pd.rectangle([8, D + 8, 26, D + 26], fill=rgb, outline=(160, 160, 160))
+        try:
+            f1 = ImageFont.truetype(CN_FONT_PATH, 14)
+            f2 = ImageFont.truetype(CN_FONT_PATH, 12)
+        except Exception:
+            f1 = f2 = ImageFont.load_default()
+        pd.text((34, D + 7), hexs, fill=(20, 20, 20), font=f1)
+        pd.text((34, D + 26), "RGB %d, %d, %d" % rgb, fill=(20, 20, 20), font=f1)
+        pd.text((34, D + 45), "双击复制色值", fill=(140, 140, 140), font=f2)
+        self._mag_photo = ImageTk.PhotoImage(full)
+        ox, oy = x + 20, y + 20
+        if ox + D > self.vw:
+            ox = x - 20 - D
+        if oy + D + panelH > self.vh:
+            oy = y - 20 - (D + panelH)
+        self.canvas.create_image(ox, oy, anchor="nw", image=self._mag_photo,
+                                 tags="mag")
+        self.canvas.tag_raise("mag")
+
     # ---------------- 悬停 ----------------
     def on_hover(self, e):
+        if self.mode == "select" and not self.start_pt:
+            self._update_magnifier(e.x, e.y)
+            return
         if self.mode != "edit" or self.drag_mode:
             return
-        idx = self._anno_at(e.x, e.y)
-        # 悬停到铅笔按钮上时保持当前文字元素
-        if idx is None and self.hover_anno_idx is not None \
-                and self.hover_anno_idx < len(self.annotations) \
-                and self._in_pencil(e.x, e.y, self.hover_anno_idx):
-            idx = self.hover_anno_idx
+        idx = self._extend_hover(e.x, e.y, self._anno_at(e.x, e.y))
         self.canvas.delete("editbtn")
+        self.canvas.delete("brushcur")
         if idx is not None:
             self.hover_anno_idx = idx
+            self.selected_idx = idx                     # 记住当前选中要素（可换色）
+            self._draw_move_box(idx)                    # 四边虚线 + 节点方框
             if self.annotations[idx]["type"] == "text":
                 self._draw_edit_handle(idx)
-            self.overlay.configure(cursor="hand2")   # 手型：可拖动
+                # 悬停在铅笔按钮上 → 手型（可点击编辑）；否则 → 十字（可拖动）
+                if self._in_pencil(e.x, e.y, idx):
+                    self.overlay.configure(cursor="hand2")
+                else:
+                    self.overlay.configure(cursor="fleur")
+            elif self.annotations[idx]["type"] == "arrow" \
+                    and self._in_rotate_handle(e.x, e.y, idx):
+                self.overlay.configure(cursor="exchange")   # 旋转
+            elif self.annotations[idx]["type"] == "arrow" \
+                    and self._in_arrow_dot(e.x, e.y, idx):
+                self.overlay.configure(cursor="hand2")      # 弯折控制点
+            else:
+                self.overlay.configure(cursor="fleur")   # 十字四向：整体平移
             return
         self.hover_anno_idx = None
+        self.canvas.delete("movebox")
 
         hit = self.hit_test(e.x, e.y)
         cur = {"nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw",
@@ -726,13 +1071,25 @@ class ScreenshotTool:
         elif hit[0] == "border":
             self.overlay.configure(cursor="fleur")
         elif hit[0] == "inside":
-            self.overlay.configure(
-                cursor="xterm" if self.tool == "text"
-                else ("crosshair" if self.tool else "fleur"))
+            if self.tool == "mosaic":
+                # 马赛克：隐藏十字光标，改用与形状一致的半透明灰色笔刷指示
+                self.overlay.configure(cursor="none")
+                self._draw_brush_cursor(e.x, e.y)
+            else:
+                self.overlay.configure(
+                    cursor="xterm" if self.tool == "text"
+                    else ("crosshair" if self.tool else "fleur"))
         else:
             self.overlay.configure(cursor="left_ptr")
 
     def on_double(self, e):
+        # 取色阶段：双击复制色值后自动退出工具
+        if self.mode == "select":
+            hexs = self.pick_hex
+            if hexs and self._set_clipboard_text(hexs):
+                self.finish()
+                self.flash_toast(f"已复制色值 {hexs}")
+            return
         if self.mode != "edit":
             return
         for i in range(len(self.annotations) - 1, -1, -1):
@@ -745,14 +1102,26 @@ class ScreenshotTool:
 
     # ---------------- 编辑：按下 ----------------
     def edit_press(self, e):
-        idx = self._anno_at(e.x, e.y)
-        if idx is None and self.hover_anno_idx is not None \
-                and self.hover_anno_idx < len(self.annotations) \
-                and self._in_pencil(e.x, e.y, self.hover_anno_idx):
-            idx = self.hover_anno_idx
+        # 正在输入文字时，点击框外仅提交/退出，不立刻新建文本（需再次点击才新建）
+        if self.text_entry is not None:
+            self.commit_text_entry()
+            return
+        idx = self._extend_hover(e.x, e.y, self._anno_at(e.x, e.y))
+        if idx is None:
+            self.selected_idx = None            # 点空白处取消选中
+        else:
+            self.selected_idx = idx
         # 1) 点击文字右上角铅笔 → 重新编辑
         if idx is not None and self._in_pencil(e.x, e.y, idx):
             self.edit_text(idx)
+            return
+        # 1.4) 点击箭头右上角旋转手柄 → 旋转整体方位
+        if idx is not None and self._in_rotate_handle(e.x, e.y, idx):
+            self._start_rotate_arrow(idx, e)
+            return
+        # 1.5) 点击箭头结构中心圆点 → 弯折箭头
+        if idx is not None and self._in_arrow_dot(e.x, e.y, idx):
+            self._start_bend_arrow(idx, e)
             return
         # 2) 选区缩放手柄
         hit = self.hit_test(e.x, e.y)
@@ -788,17 +1157,80 @@ class ScreenshotTool:
                 self.temp_item = None
                 if self.tool == "pen":
                     self.pen_points = [x, y]
+                elif self.tool == "mosaic":
+                    self._mosaic_stamps = []
+                    l, t, r, b = self.sel
+                    self._mos_off = (l, t)
+                    self._mos_pix = self._pixelate(
+                        self.full_img.crop((l, t, r, b)).convert("RGB"))
+                    self._mos_work = self._flatten().convert("RGB")
+                    self._mos_last = None
+                    self._paint_mosaic_stamp(x, y)
 
     def _start_move_anno(self, idx, e):
         self.drag_mode = "moveanno"
         self.move_idx = idx
         self.start_pt = (e.x, e.y)
-        # 背景 = 除该元素外的抗锯齿合成，之后仅移动该元素
-        bg = self._flatten(exclude=idx)
+        # 背景 = 除该元素外的合成（拖动过程用较低超采样，更流畅）
+        bg = self._flatten(ss=2, exclude=idx)
         self._show_crop(bg)
         self._draw_chrome()
+        a = self.annotations[idx]
+        if a["type"] in ("rect", "rrect", "ellipse", "arrow"):
+            self._show_shape_overlay(a, "movetemp")
+        else:
+            self._draw_one_vector(a, "movetemp")
+        self._draw_move_box(idx)
+
+    def _start_bend_arrow(self, idx, e):
+        self.drag_mode = "bendarrow"
+        self.move_idx = idx
+        self.start_pt = (e.x, e.y)
+        bg = self._flatten(ss=2, exclude=idx)
+        self._show_crop(bg)
+        self._draw_chrome()
+        self._show_shape_overlay(self.annotations[idx], "movetemp")
+        self._draw_move_box(idx)
+
+    def _bend_arrow_to(self, idx, mx, my):
+        """把曲线中点拖到 (mx,my)：反解二次贝塞尔控制点，使 B(0.5)=中点。"""
+        a = self.annotations[idx]
+        x0, y0, x1, y1 = a["coords"]
+        a["ctrl"] = (2 * mx - 0.5 * (x0 + x1), 2 * my - 0.5 * (y0 + y1))
+
+    def _start_rotate_arrow(self, idx, e):
+        a = self.annotations[idx]
+        x0, y0, x1, y1 = a["coords"]
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        ctrl = a.get("ctrl") or (cx, cy)
+        self.drag_mode = "rotatearrow"
+        self.move_idx = idx
+        self._rot_center = (cx, cy)
+        self._rot_base = [(x0, y0), (x1, y1), ctrl]
+        self._rot_start = math.atan2(e.y - cy, e.x - cx)
+        bg = self._flatten(ss=2, exclude=idx)
+        self._show_crop(bg)
+        self._draw_chrome()
+        self._show_shape_overlay(a, "movetemp")
+        self._draw_move_box(idx)
+
+    def _rotate_arrow_to(self, e):
+        cx, cy = self._rot_center
+        ang = math.atan2(e.y - cy, e.x - cx) - self._rot_start
+        ca, sa = math.cos(ang), math.sin(ang)
+
+        def rot(p):
+            dx, dy = p[0] - cx, p[1] - cy
+            return (cx + dx * ca - dy * sa, cy + dx * sa + dy * ca)
+
+        p0, p1, pc = self._rot_base
+        r0, r1, rc = rot(p0), rot(p1), rot(pc)
+        a = self.annotations[self.move_idx]
+        a["coords"] = (r0[0], r0[1], r1[0], r1[1])
+        a["ctrl"] = rc
 
     def edit_drag(self, e):
+        shift = bool(e.state & 0x0001)
         if self.drag_mode == "resize":
             self._do_resize(e.x, e.y)
         elif self.drag_mode == "move":
@@ -808,10 +1240,26 @@ class ScreenshotTool:
             self._move_anno(self.move_idx, dx, dy)
             self.start_pt = (e.x, e.y)
             self.canvas.delete("movetemp")
-            self._draw_one_vector(self.annotations[self.move_idx], "movetemp")
+            a = self.annotations[self.move_idx]
+            if a["type"] in ("rect", "rrect", "ellipse", "arrow"):
+                self._show_shape_overlay(a, "movetemp")   # 抗锯齿平滑预览
+            else:
+                self._draw_one_vector(a, "movetemp")
+            self._draw_move_box(self.move_idx)
             self._draw_edit_handle(self.move_idx)
+        elif self.drag_mode == "bendarrow":
+            mx, my = self._clamp(e.x, e.y)
+            self._bend_arrow_to(self.move_idx, mx, my)
+            self.canvas.delete("movetemp")
+            self._show_shape_overlay(self.annotations[self.move_idx], "movetemp")
+            self._draw_move_box(self.move_idx)
+        elif self.drag_mode == "rotatearrow":
+            self._rotate_arrow_to(e)
+            self.canvas.delete("movetemp")
+            self._show_shape_overlay(self.annotations[self.move_idx], "movetemp")
+            self._draw_move_box(self.move_idx)
         elif self.drag_mode == "draw":
-            self._do_draw(e.x, e.y)
+            self._do_draw(e.x, e.y, shift)
 
     def edit_release(self, e):
         if self.drag_mode in ("resize", "move"):
@@ -820,13 +1268,14 @@ class ScreenshotTool:
             self.drag_mode = None
             self.build_toolbar()
             self.redraw_static()
-        elif self.drag_mode == "moveanno":
+        elif self.drag_mode in ("moveanno", "bendarrow", "rotatearrow"):
             self.canvas.delete("movetemp")
+            self.canvas.delete("movebox")
             self.drag_mode = None
             self.redraw_static()
             self._draw_edit_handle(self.move_idx)
         elif self.drag_mode == "draw":
-            self._commit_draw(e.x, e.y)
+            self._commit_draw(e.x, e.y, bool(e.state & 0x0001))
             self.drag_mode = None
         self.start_pt = None
 
@@ -860,7 +1309,9 @@ class ScreenshotTool:
 
     def _move_anno(self, idx, dx, dy):
         a = self.annotations[idx]
-        if a["type"] == "pen":
+        if a["type"] == "mosaic":
+            a["stamps"] = [(sx + dx, sy + dy) for sx, sy in a["stamps"]]
+        elif a["type"] == "pen":
             a["points"] = [c + (dx if i % 2 == 0 else dy)
                            for i, c in enumerate(a["points"])]
         elif a["type"] == "text":
@@ -869,6 +1320,9 @@ class ScreenshotTool:
         else:
             x0, y0, x1, y1 = a["coords"]
             a["coords"] = (x0 + dx, y0 + dy, x1 + dx, y1 + dy)
+            if a.get("ctrl"):                 # 箭头弯折控制点随整体平移
+                cx, cy = a["ctrl"]
+                a["ctrl"] = (cx + dx, cy + dy)
 
     def _clamp(self, x, y):
         l, t, r, b = self.sel
@@ -879,37 +1333,192 @@ class ScreenshotTool:
         for quad, col in comet_polys(*coords, w, color):
             self.canvas.create_polygon(quad, fill=col, outline=col, tags=tag)
 
-    def _do_draw(self, x, y):
+    def _shape_photo(self, a):
+        """把 rect/rrect/ellipse/arrow 渲染成抗锯齿小图（与最终合成完全一致），
+        返回 (PhotoImage, 左上x, 左上y)。用于插入/拖动时的所见即最终所得预览。"""
+        typ = a["type"]
+        col = _hex(a["color"])
+        w = a["width"]
+        ss = 4
+        if typ == "arrow":
+            x0, y0, x1, y1 = a["coords"]
+            ctrl = a.get("ctrl") or ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+            img_ss, ax, ay = render_comet_curve((x0, y0), ctrl, (x1, y1),
+                                                w, a["color"], ss)
+            img = _smooth_resize(img_ss, (max(1, img_ss.width // ss),
+                                          max(1, img_ss.height // ss)))
+            return ImageTk.PhotoImage(img), ax, ay
+        x0, y0, x1, y1 = a["coords"]
+        lx, ty = min(x0, x1), min(y0, y1)
+        rx, by = max(x0, x1), max(y0, y1)
+        pad = int(w / 2) + 3
+        W, H = int(rx - lx) + 2 * pad, int(by - ty) + 2 * pad
+        im = Image.new("RGBA", (W * ss, H * ss), (255, 255, 255, 0))
+        d = ImageDraw.Draw(im)
+        half = w * ss / 2.0
+
+        def L(vx, vy):
+            return ((vx - lx + pad) * ss, (vy - ty + pad) * ss)
+
+        aa, bb = L(lx, ty), L(rx, by)
+        ex = [aa[0] - half, aa[1] - half, bb[0] + half, bb[1] + half]
+        if typ == "rect":
+            d.rectangle(ex, outline=col, width=int(w * ss))
+        elif typ == "rrect":
+            rad = self._rrect_radius(lx, ty, rx, by) * ss
+            d.rounded_rectangle(ex, radius=rad, outline=col, width=int(w * ss))
+        elif typ == "ellipse":
+            d.ellipse(ex, outline=col, width=int(w * ss))
+        im = _smooth_resize(im, (W, H))
+        return ImageTk.PhotoImage(im), int(lx - pad), int(ty - pad)
+
+    def _show_shape_overlay(self, a, tag):
+        """在 canvas 上以抗锯齿小图覆盖显示一个形状要素（alpha 叠加于底图）。
+        用单一引用而非累积列表，避免拖动时内存与卡顿累积。"""
+        self.canvas.delete(tag)
+        photo, ox, oy = self._shape_photo(a)
+        self._ov_photo = photo                       # 仅保留最新一张的引用
+        self.canvas.create_image(ox, oy, anchor="nw", image=photo, tags=tag)
+
+    def _canvas_rrect(self, x0, y0, x1, y1, color, w, tag, r=None):
+        """在 canvas 上画圆角矩形轮廓（4 段圆角 + 4 条边），用于实时预览。"""
+        l, t = min(x0, x1), min(y0, y1)
+        rr, bb = max(x0, x1), max(y0, y1)
+        if r is None:
+            r = self._rrect_radius(l, t, rr, bb)
+        d = r * 2
+        opt = dict(outline=color, width=w, style=tk.ARC, tags=tag)
+        self.canvas.create_arc(l, t, l + d, t + d, start=90, extent=90, **opt)
+        self.canvas.create_arc(rr - d, t, rr, t + d, start=0, extent=90, **opt)
+        self.canvas.create_arc(l, bb - d, l + d, bb, start=180, extent=90, **opt)
+        self.canvas.create_arc(rr - d, bb - d, rr, bb, start=270, extent=90, **opt)
+        for pts in [(l + r, t, rr - r, t), (l + r, bb, rr - r, bb),
+                    (l, t + r, l, bb - r), (rr, t + r, rr, bb - r)]:
+            self.canvas.create_line(*pts, fill=color, width=w, tags=tag)
+
+    def _mosaic_brush(self):
+        return MOSAIC_BRUSH[self.level]
+
+    def _draw_brush_cursor(self, x, y):
+        """马赛克笔刷指示：真 alpha 渲染，圆/方的透明度与颜色完全一致。"""
+        self.canvas.delete("brushcur")
+        d = max(2, int(self._mosaic_brush()))
+        ss = 3
+        S = d * ss
+        im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        fill = (150, 156, 163, 90)          # 半透明灰（圆/方共用）
+        outline = (90, 95, 100, 170)
+        box = [ss, ss, S - ss, S - ss]
+        if self.mosaic_shape == "circle":
+            dr.ellipse(box, fill=fill, outline=outline, width=ss)
+        else:
+            dr.rectangle(box, fill=fill, outline=outline, width=ss)
+        self._brush_photo = ImageTk.PhotoImage(_smooth_resize(im, (d, d)))
+        self.canvas.create_image(int(x - d / 2), int(y - d / 2), anchor="nw",
+                                 image=self._brush_photo, tags="brushcur")
+        self.canvas.tag_raise("brushcur")
+
+    def _stamp_mosaic_tile(self, x, y):
+        """把一枚笔刷贴进工作图（不刷新显示）。"""
+        l, t = self._mos_off
+        cx, cy = x - l, y - t
+        rad = self._mosaic_brush() / 2.0
+        W, H = self._mos_work.size
+        bx0, by0 = int(max(0, cx - rad)), int(max(0, cy - rad))
+        bx1, by1 = int(min(W, cx + rad + 1)), int(min(H, cy + rad + 1))
+        if bx1 <= bx0 or by1 <= by0:
+            return
+        tile_mask = Image.new("L", (bx1 - bx0, by1 - by0), 0)
+        md = ImageDraw.Draw(tile_mask)
+        bb = [cx - rad - bx0, cy - rad - by0, cx + rad - bx0, cy + rad - by0]
+        (md.ellipse if self.mosaic_shape == "circle" else md.rectangle)(
+            bb, fill=255)
+        self._mos_work.paste(self._mos_pix.crop((bx0, by0, bx1, by1)),
+                             (bx0, by0), tile_mask)
+
+    def _paint_mosaic_stamp(self, x, y):
+        """所见即所得：从上一点到当前点插值连续贴印（避免快速滑动出现断点），
+        全部贴完后统一刷新显示。"""
+        last = getattr(self, "_mos_last", None)
+        if last is None:
+            self._stamp_mosaic_tile(x, y)
+        else:
+            lx, ly = last
+            dist = math.hypot(x - lx, y - ly)
+            step = max(1.0, self._mosaic_brush() * 0.35)   # 间距≤笔刷，保证连续
+            n = max(1, int(dist / step))
+            for i in range(1, n + 1):
+                px = lx + (x - lx) * i / n
+                py = ly + (y - ly) * i / n
+                self._stamp_mosaic_tile(px, py)
+                self._mosaic_stamps.append((px, py))
+        if last is None:
+            self._mosaic_stamps.append((x, y))
+        self._mos_last = (x, y)
+        self._show_crop(self._mos_work)
+        self._draw_chrome()
+        self._draw_brush_cursor(x, y)                  # 笔刷指示随涂抹跟随
+
+    def _draw_mosaic_preview(self, stamps, brush, shape, tag):
+        """马赛克占位预览（仅用于选区缩放等瞬态；正式合成在 redraw_static）。"""
+        self.canvas.delete(tag)
+        r = brush / 2.0
+        for sx, sy in stamps:
+            if shape == "circle":
+                self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                        fill="#9098A0", outline="",
+                                        stipple="gray50", tags=tag)
+            else:
+                self.canvas.create_rectangle(sx - r, sy - r, sx + r, sy + r,
+                                             fill="#9098A0", outline="",
+                                             stipple="gray50", tags=tag)
+
+    def _square(self, x0, y0, x, y):
+        """按住 Shift 时约束为正方形（正圆 / 正方 / 正圆角方框）。"""
+        s = max(abs(x - x0), abs(y - y0))
+        return (x0 + (s if x >= x0 else -s), y0 + (s if y >= y0 else -s))
+
+    def _do_draw(self, x, y, shift=False):
         x, y = self._clamp(x, y)
         x0, y0 = self.start_pt
+        if shift and self.tool in ("rect", "rrect", "ellipse"):
+            x, y = self._square(x0, y0, x, y)
+            x, y = self._clamp(x, y)
         if self.temp_item:
             self.canvas.delete(self.temp_item)
             self.temp_item = None
         self.canvas.delete("drawtemp")
         w = self.width
-        if self.tool == "rect":
-            self.temp_item = self.canvas.create_rectangle(
-                x0, y0, x, y, outline=self.color, width=w)
-        elif self.tool == "ellipse":
-            self.temp_item = self.canvas.create_oval(
-                x0, y0, x, y, outline=self.color, width=w)
+        if self.tool in ("rect", "rrect", "ellipse"):
+            # 所见即最终所得：用与导出一致的抗锯齿小图预览
+            self._show_shape_overlay(
+                {"type": self.tool, "coords": (x0, y0, x, y),
+                 "color": self.color, "width": w}, "drawtemp")
         elif self.tool == "arrow":
-            self._draw_comet((x0, y0, x, y), w, self.color, "drawtemp")
+            self._show_shape_overlay(
+                {"type": "arrow", "coords": (x0, y0, x, y),
+                 "color": self.color, "width": w}, "drawtemp")
         elif self.tool == "mosaic":
-            self.temp_item = self.canvas.create_rectangle(
-                x0, y0, x, y, outline="#FFFFFF", width=1, dash=(4, 3))
+            self._paint_mosaic_stamp(x, y)
         elif self.tool == "pen":
             self.pen_points.extend([x, y])
             self.temp_item = self.canvas.create_line(
                 *self.pen_points, fill=self.color, width=w,
                 capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True)
 
-    def _commit_draw(self, x, y):
+    def _commit_draw(self, x, y, shift=False):
         x, y = self._clamp(x, y)
         x0, y0 = self.start_pt
+        if shift and self.tool in ("rect", "rrect", "ellipse"):
+            x, y = self._square(x0, y0, x, y)
+            x, y = self._clamp(x, y)
         a = None
         if self.tool == "rect" and abs(x - x0) > 2 and abs(y - y0) > 2:
             a = {"type": "rect", "coords": (x0, y0, x, y),
+                 "color": self.color, "width": self.width}
+        elif self.tool == "rrect" and abs(x - x0) > 2 and abs(y - y0) > 2:
+            a = {"type": "rrect", "coords": (x0, y0, x, y),
                  "color": self.color, "width": self.width}
         elif self.tool == "ellipse" and abs(x - x0) > 2 and abs(y - y0) > 2:
             a = {"type": "ellipse", "coords": (x0, y0, x, y),
@@ -917,9 +1526,11 @@ class ScreenshotTool:
         elif self.tool == "arrow" and (abs(x - x0) > 3 or abs(y - y0) > 3):
             a = {"type": "arrow", "coords": (x0, y0, x, y),
                  "color": self.color, "width": self.width}
-        elif self.tool == "mosaic" and abs(x - x0) > 4 and abs(y - y0) > 4:
-            a = {"type": "mosaic",
-                 "coords": (min(x0, x), min(y0, y), max(x0, x), max(y0, y))}
+        elif self.tool == "mosaic" and getattr(self, "_mosaic_stamps", None):
+            a = {"type": "mosaic", "stamps": list(self._mosaic_stamps),
+                 "shape": self.mosaic_shape, "brush": self._mosaic_brush()}
+            self._mosaic_stamps = None
+            self._mos_last = None
         elif self.tool == "pen" and self.pen_points and len(self.pen_points) >= 4:
             a = {"type": "pen", "points": list(self.pen_points),
                  "color": self.color, "width": self.width}
@@ -930,6 +1541,7 @@ class ScreenshotTool:
         self.pen_points = None
         if a:
             self.annotations.append(a)
+            self.selected_idx = len(self.annotations) - 1   # 新建后即为选中
             self.redraw_static()
 
     # ---------------- 文字 ----------------
@@ -938,16 +1550,48 @@ class ScreenshotTool:
         x, y = self._clamp(x, y)
         color = color or self.color
         fs = fs or self.font_size
-        var = tk.StringVar(value=text)
-        entry = tk.Entry(self.overlay, textvariable=var, bd=0, bg="#FFFFFF",
-                         fg=color, insertbackground=color,
-                         font=(CN_FONT_FAMILY, -fs))
-        ew = self.canvas.create_window(x, y, anchor="nw", window=entry)
-        entry.focus_set()
-        entry.icursor("end")
-        self.text_entry = (entry, var, x, y, ew, color, fs)
-        entry.bind("<Return>", lambda e: self.commit_text_entry())
-        entry.bind("<Escape>", lambda e: self.cancel_text_entry())
+        txt = tk.Text(self.overlay, bd=0, bg="#FFFFFF", fg=color,
+                      insertbackground=color, font=(TEXT_FONT_FAMILY, -fs),
+                      wrap="none", highlightthickness=0, padx=0, pady=0)
+        if text:
+            txt.insert("1.0", text)
+        _w0, _h0, lineh, _asc = measure_mixed(text or " ", fs)
+        # 初始宽度与光标高度一致（正方形起始框），随输入扩充
+        ew = self.canvas.create_window(x, y, anchor="nw", window=txt,
+                                       width=lineh + 2, height=lineh + 2)
+        txt.focus_set()
+        txt.mark_set("insert", "end")
+        self.text_entry = (txt, x, y, ew, color, fs)
+        # 回车提交；Shift+回车换行
+        txt.bind("<Return>", self._text_commit_key)
+        txt.bind("<Shift-Return>", self._text_newline_key)
+        txt.bind("<Escape>", lambda e: self.cancel_text_entry())
+        txt.bind("<KeyRelease>", lambda e: self._update_text_dashbox())
+        self.overlay.after(10, self._update_text_dashbox)
+
+    def _text_commit_key(self, e):
+        self.commit_text_entry()
+        return "break"
+
+    def _text_newline_key(self, e):
+        e.widget.insert("insert", "\n")
+        self._update_text_dashbox()
+        return "break"
+
+    def _update_text_dashbox(self):
+        """输入过程中始终显示虚线定位框；默认 2 个中文字宽，随输入扩充。"""
+        if not self.text_entry:
+            return
+        txt, x, y, ew, color, fs = self.text_entry
+        content = txt.get("1.0", "end-1c")
+        w, h, lineh, _asc = measure_mixed(content if content else " ", fs)
+        ww = max(lineh, w) + 4          # 初始≈光标高度的方框，随内容加宽
+        hh = lineh * (content.count("\n") + 1) + 2
+        self.canvas.itemconfigure(ew, width=ww, height=hh)
+        self.canvas.delete("textbox")
+        self.canvas.create_rectangle(x - 3, y - 2, x + ww + 3, y + hh + 2,
+                                     outline=ACCENT, width=2, dash=(16, 5, 2, 5),
+                                     tags="textbox")
 
     def edit_text(self, idx):
         a = self.annotations.pop(idx)
@@ -958,10 +1602,11 @@ class ScreenshotTool:
     def commit_text_entry(self):
         if not self.text_entry:
             return
-        entry, var, x, y, ew, color, fs = self.text_entry
-        text = var.get()
+        txt, x, y, ew, color, fs = self.text_entry
+        text = txt.get("1.0", "end-1c")
         self.canvas.delete(ew)
-        entry.destroy()
+        self.canvas.delete("textbox")
+        txt.destroy()
         self.text_entry = None
         if text.strip():
             self.annotations.append({"type": "text", "coords": (x, y),
@@ -972,9 +1617,10 @@ class ScreenshotTool:
     def cancel_text_entry(self):
         if not self.text_entry:
             return
-        entry, var, x, y, ew, color, fs = self.text_entry
+        txt, x, y, ew, color, fs = self.text_entry
         self.canvas.delete(ew)
-        entry.destroy()
+        self.canvas.delete("textbox")
+        txt.destroy()
         self.text_entry = None
 
     # ---------------- 抗锯齿合成（核心）----------------
@@ -988,12 +1634,24 @@ class ScreenshotTool:
         ox, oy = l, t
         items = [a for i, a in enumerate(self.annotations) if i != exclude]
 
-        # 1) 马赛克（先铺到底图）
-        for a in items:
-            if a["type"] == "mosaic":
-                x0, y0, x1, y1 = a["coords"]
-                reg = base.crop((x0 - ox, y0 - oy, x1 - ox, y1 - oy))
-                base.paste(self._pixelate(reg), (x0 - ox, y0 - oy))
+        # 1) 马赛克（先铺到底图）：按笔刷方块/圆形形状遮罩粘贴像素化结果
+        mos = [a for a in items if a["type"] == "mosaic"]
+        if mos:
+            pix = self._pixelate(base)
+            mask = Image.new("L", (W, H), 0)
+            md = ImageDraw.Draw(mask)
+            for a in mos:
+                if "stamps" in a:                      # 笔刷形式
+                    rad = a.get("brush", 20) / 2.0
+                    circle = a.get("shape") == "circle"
+                    for sx, sy in a["stamps"]:
+                        cx, cy = sx - ox, sy - oy
+                        bb = [cx - rad, cy - rad, cx + rad, cy + rad]
+                        (md.ellipse if circle else md.rectangle)(bb, fill=255)
+                else:                                   # 兼容旧矩形格式
+                    x0, y0, x1, y1 = a["coords"]
+                    md.rectangle([x0 - ox, y0 - oy, x1 - ox, y1 - oy], fill=255)
+            base.paste(pix, (0, 0), mask)
 
         # 2) 矢量图形（超采样后缩小，抗锯齿）
         ov = Image.new("RGBA", (W * ss, H * ss), (0, 0, 0, 0))
@@ -1018,6 +1676,15 @@ class ScreenshotTool:
                 d.rectangle([aa[0] - half, aa[1] - half,
                              bb[0] + half, bb[1] + half],
                             outline=col, width=int(wpx))
+            elif typ == "rrect":
+                x0, y0, x1, y1 = a["coords"]
+                lx, ty = min(x0, x1), min(y0, y1)
+                rx, by = max(x0, x1), max(y0, y1)
+                rad = self._rrect_radius(lx, ty, rx, by) * ss
+                aa, bb = P(lx, ty), P(rx, by)
+                d.rounded_rectangle([aa[0] - half, aa[1] - half,
+                                     bb[0] + half, bb[1] + half],
+                                    radius=rad, outline=col, width=int(wpx))
             elif typ == "ellipse":
                 x0, y0, x1, y1 = a["coords"]
                 aa = P(min(x0, x1), min(y0, y1))
@@ -1027,10 +1694,11 @@ class ScreenshotTool:
                           outline=col, width=int(wpx))
             elif typ == "arrow":
                 x0, y0, x1, y1 = a["coords"]
-                rot = render_comet_ss(x0, y0, x1, y1, a["width"], a["color"], ss)
-                mx, my = P((x0 + x1) / 2, (y0 + y1) / 2)
-                ov.alpha_composite(rot, (int(mx - rot.width / 2),
-                                         int(my - rot.height / 2)))
+                ctrl = a.get("ctrl") or ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                img_ss, ax, ay = render_comet_curve((x0, y0), ctrl, (x1, y1),
+                                                    a["width"], a["color"], ss)
+                ov.alpha_composite(img_ss, (int((ax - ox) * ss),
+                                            int((ay - oy) * ss)))
             elif typ == "pen":
                 pts = [P(a["points"][i], a["points"][i + 1])
                        for i in range(0, len(a["points"]), 2)]
@@ -1041,28 +1709,25 @@ class ScreenshotTool:
                         d.ellipse([x - rr, y - rr, x + rr, y + rr], fill=col)
         result = base.convert("RGBA")
         if has_vec:
-            result = Image.alpha_composite(result, ov.resize((W, H),
-                                                             Image.LANCZOS))
-        # 3) 文字（1x 直接绘制，字体自带抗锯齿，最清晰）
+            result = Image.alpha_composite(result, _smooth_resize(ov, (W, H)))
+        # 3) 文字（1x 直接绘制，中英混排：齐伋体 + California FB，字体自带抗锯齿）
         dt = ImageDraw.Draw(result)
         for a in items:
             if a["type"] != "text":
                 continue
             x, y = a["coords"]
-            try:
-                font = ImageFont.truetype(CN_FONT_PATH, a["font_size"])
-            except Exception:
-                font = ImageFont.load_default()
-            dt.text((x - ox, y - oy), a["text"], fill=a["color"], font=font)
+            draw_mixed(dt, x - ox, y - oy, a["text"], a["color"], a["font_size"])
         return result.convert("RGB")
 
     @staticmethod
-    def _pixelate(region, block=12):
+    def _pixelate(region, block=15):
         w, h = region.size
         if w < 1 or h < 1:
             return region
+        # 用 BOX 平均下采样（每个色块=区域平均色，色彩更多元、打码更明显），
+        # 再用 NEAREST 放大成马赛克方格。
         small = region.resize((max(1, w // block), max(1, h // block)),
-                              Image.NEAREST)
+                              Image.BOX)
         return small.resize((w, h), Image.NEAREST)
 
     # ---------------- 显示 ----------------
@@ -1112,6 +1777,8 @@ class ScreenshotTool:
         if t == "rect":
             self.canvas.create_rectangle(*a["coords"], outline=a["color"],
                                          width=a["width"], tags=tag)
+        elif t == "rrect":
+            self._canvas_rrect(*a["coords"], a["color"], a["width"], tag)
         elif t == "ellipse":
             self.canvas.create_oval(*a["coords"], outline=a["color"],
                                     width=a["width"], tags=tag)
@@ -1122,16 +1789,22 @@ class ScreenshotTool:
                                     width=a["width"], capstyle=tk.ROUND,
                                     joinstyle=tk.ROUND, smooth=True, tags=tag)
         elif t == "mosaic":
-            x0, y0, x1, y1 = a["coords"]
-            reg = self.full_img.crop((x0, y0, x1, y1))
-            photo = ImageTk.PhotoImage(self._pixelate(reg))
-            self._imgrefs.append(photo)
-            self.canvas.create_image(x0, y0, anchor="nw", image=photo, tags=tag)
+            # 实时预览用灰色占位（真实马赛克在 redraw_static 中合成）
+            if "stamps" in a:
+                self._draw_mosaic_preview(a["stamps"], a.get("brush", 20),
+                                          a.get("shape", "rect"), tag)
+            else:
+                x0, y0, x1, y1 = a["coords"]
+                reg = self.full_img.crop((x0, y0, x1, y1))
+                photo = ImageTk.PhotoImage(self._pixelate(reg))
+                self._imgrefs.append(photo)
+                self.canvas.create_image(x0, y0, anchor="nw", image=photo,
+                                         tags=tag)
         elif t == "text":
             x, y = a["coords"]
             self.canvas.create_text(x, y, anchor="nw", text=a["text"],
                                     fill=a["color"],
-                                    font=(CN_FONT_FAMILY, -a["font_size"]),
+                                    font=(TEXT_FONT_FAMILY, -a["font_size"]),
                                     tags=tag)
 
     def _size_label(self, l, t, r, b, tag):
@@ -1150,7 +1823,9 @@ class ScreenshotTool:
         if self.annotations:
             self.annotations.pop()
             self.hover_anno_idx = None
+            self.selected_idx = None
             self.canvas.delete("editbtn")
+            self.canvas.delete("movebox")
             self.redraw_static()
 
     # ---------------- 工具栏 ----------------
@@ -1166,8 +1841,8 @@ class ScreenshotTool:
     def build_toolbar(self):
         self._destroy_toolbars()
         self.tool_buttons = {}
-        layout = [("tool", "rect"), ("tool", "ellipse"), ("tool", "arrow"),
-                  ("tool", "pen"), ("tool", "mosaic"), ("tool", "text"),
+        layout = [("tool", "rect"), ("tool", "rrect"), ("tool", "ellipse"),
+                  ("tool", "arrow"), ("tool", "mosaic"), ("tool", "text"),
                   ("sep",),
                   ("act", "undo"), ("act", "save"),
                   ("sep",),
@@ -1188,12 +1863,13 @@ class ScreenshotTool:
         height = btn + pad * 2
 
         l, t, r, b = self.sel
+        # 工具栏默认放在选区「右下方」（下方需容纳工具栏+子栏）
         tx = min(max(r - width, 8), self.vw - width - 8)
-        ty = t - height - 14
-        if ty < 8:
-            ty = b + 14
-        if ty + height > self.vh - 8:
-            ty = max(8, t - height - 14)
+        ty = b + 14
+        if ty + height + 52 > self.vh - 8:      # 下方放不下 → 放到上方
+            ty = t - height - 14
+            if ty < 8:                          # 上方也放不下 → 夹在可视范围
+                ty = max(8, min(b + 14, self.vh - height - 8))
         self._tb_pos = (tx, ty, width, height)
 
         pill, M = render_pill(width, height, seps)
@@ -1241,7 +1917,8 @@ class ScreenshotTool:
 
     def set_tool(self, name):
         self.tool = None if self.tool == name else name
-        self._highlight_tool()
+        # 重建工具栏，使子栏在「颜色」与「马赛克形状」之间切换
+        self.build_toolbar()
 
     def _build_subbar(self, tx, ty, width, height):
         sh = 40
@@ -1249,10 +1926,15 @@ class ScreenshotTool:
         if sy + sh > self.vh - 8:
             sy = ty - sh - 10
 
-        # 计算内容宽度
-        n_level, n_color = len(LEVELS), len(PRESET_COLORS)
+        n_level = len(LEVELS)
         pad = 12
-        cw = pad + n_level * 28 + 14 + (n_color + 1) * 28 + pad
+        mosaic = (self.tool == "mosaic")
+        if mosaic:
+            # 档位(笔刷大小) + 分隔 + 形状(方框/圆形)
+            cw = pad + n_level * 28 + 14 + 2 * 32 + pad
+        else:
+            n_color = len(PRESET_COLORS)
+            cw = pad + n_level * 28 + 14 + (n_color + 1) * 28 + pad
         sx = min(max(tx, 8), self.vw - cw - 8)
 
         seps = [pad + n_level * 28 + 7]
@@ -1272,23 +1954,45 @@ class ScreenshotTool:
             self._tb_widgets.append(lbl)
             x += 28
         x += 14
-        self.color_swatches = {}
-        for col in PRESET_COLORS:
-            lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
-            lbl.bind("<Button-1>", lambda e, c=col: self.set_color(c))
-            self.canvas.create_window(x + 13, cy, window=lbl, tags="toolbar")
-            self.color_swatches[col] = lbl
-            self._tb_widgets.append(lbl)
-            x += 28
-        more = tk.Label(self.canvas, image=render_plus(), bg=PILL_BG, bd=0,
-                        cursor="hand2")
-        more._ref = more.cget("image")
-        more.bind("<Button-1>", lambda e: self.pick_color())
-        self.canvas.create_window(x + 13, cy, window=more, tags="toolbar")
-        self._tb_widgets.append(more)
+
+        if mosaic:
+            # 形状切换：方框(rect) / 圆形(ellipse)
+            self.shape_buttons = {}
+            for shp, icon in [("rect", "rect"), ("circle", "ellipse")]:
+                lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
+                lbl.bind("<Button-1>", lambda e, s=shp: self.set_mosaic_shape(s))
+                self.canvas.create_window(x + 16, cy, window=lbl, tags="toolbar")
+                self.shape_buttons[shp] = (lbl, icon)
+                self._tb_widgets.append(lbl)
+                x += 32
+            self.set_mosaic_shape(self.mosaic_shape)
+        else:
+            self.color_swatches = {}
+            for col in PRESET_COLORS:
+                lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
+                lbl.bind("<Button-1>", lambda e, c=col: self.set_color(c))
+                self.canvas.create_window(x + 13, cy, window=lbl, tags="toolbar")
+                self.color_swatches[col] = lbl
+                self._tb_widgets.append(lbl)
+                x += 28
+            more = tk.Label(self.canvas, image=render_plus(), bg=PILL_BG, bd=0,
+                            cursor="hand2")
+            more._ref = more.cget("image")
+            more.bind("<Button-1>", lambda e: self.pick_color())
+            self.canvas.create_window(x + 13, cy, window=more, tags="toolbar")
+            self._tb_widgets.append(more)
+            self.set_color(self.color)
 
         self.set_level(self.level)
-        self.set_color(self.color)
+
+    def set_mosaic_shape(self, shape):
+        self.mosaic_shape = shape
+        if not hasattr(self, "shape_buttons"):
+            return
+        for shp, (lbl, icon) in self.shape_buttons.items():
+            img = render_icon(icon, 28, "active" if shp == shape else "normal")
+            lbl._ref = img
+            lbl.configure(image=img)
 
     def set_level(self, k):
         self.level = k
@@ -1300,6 +2004,15 @@ class ScreenshotTool:
 
     def set_color(self, col):
         self.color = col
+        # 若有选中的带颜色要素 → 直接替换其颜色（所见即所得）
+        si = self.selected_idx
+        if si is not None and 0 <= si < len(self.annotations) \
+                and "color" in self.annotations[si]:
+            self.annotations[si]["color"] = col
+            self.redraw_static()
+            self._draw_move_box(si)
+            if self.annotations[si]["type"] == "text":
+                self._draw_edit_handle(si)
         if not hasattr(self, "color_swatches"):
             return
         for c, lbl in self.color_swatches.items():
@@ -1313,7 +2026,21 @@ class ScreenshotTool:
             self.set_color(hexc)
 
     # ---------------- 动作 ----------------
+    def _set_clipboard_text(self, text):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+            return True
+        except Exception:
+            return False
+
     def do_copy(self):
+        # 选区阶段：Ctrl+C 复制当前放大镜取到的色号
+        if self.mode == "select":
+            if self.pick_hex and self._set_clipboard_text(self.pick_hex):
+                self.flash_toast(f"已复制色值 {self.pick_hex}")
+            return
         if self.mode != "edit":
             return
         img = self._final()
@@ -1355,6 +2082,11 @@ class ScreenshotTool:
 
     def finish(self):
         self._destroy_toolbars()
+        for seq in ("<Escape>", "<Control-z>", "<Control-c>", "<Control-s>"):
+            try:
+                self.root.unbind_all(seq)
+            except Exception:
+                pass
         if self.overlay:
             try:
                 self.overlay.destroy()

@@ -1,199 +1,119 @@
 <div align="center">
 
-# 📸 SnapMark
+# SnapMark · 截图标注小工具
 
-**一款轻量、顺滑、颜值在线的 Windows 截图标注小工具**
+**纯本地、零云端依赖的 Windows 截图 + 标注工具**
+Snipaste 风格的绿色选区与圆角药丸工具栏 · 全程 Pillow 抗锯齿渲染
 
-按一个快捷键，框选任意区域，即刻标注 —— 矩形、椭圆、彗星箭头、画笔、马赛克、文字，一键复制或保存。
+![platform](https://img.shields.io/badge/platform-Windows-blue)
+![python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
+![license](https://img.shields.io/badge/license-MIT-green)
+![deps](https://img.shields.io/badge/依赖-Pillow%20%2B%20tkinter-orange)
 
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)](#)
-[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](#)
-[![Dependencies](https://img.shields.io/badge/依赖-仅%20Pillow-brightgreen)](#)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Style](https://img.shields.io/badge/UI-Snipaste%20风格-13C060)](#)
-
-<img src="assets/hero.png" width="820" alt="SnapMark 界面预览">
+<img src="assets/hero.png" width="760" alt="SnapMark 界面预览">
 
 </div>
 
 ---
 
-## ✨ 为什么选择 SnapMark
+## ✨ 简介
 
-- 🪶 **极轻量**：纯 Python 实现，除 [Pillow](https://python-pillow.org/) 外**零第三方依赖**，`tkinter` 用系统自带。
-- ⚡ **调用顺滑**：常驻后台（无控制台黑框），一个冷门全局快捷键即按即弹，几乎零延迟。
-- 🎨 **抗锯齿渲染**：图标与标注全部用 4× 超采样 + LANCZOS 抗锯齿绘制，**所见即所得**，导出无锯齿。
-- ☄️ **彗星箭头**：独特的扫尾箭头，尾部收成尖点、颜色由头到尾渐变，比普通箭头更有质感。
-- 🖐️ **随手可改**：标注加完还能拖动位置、文字可二次编辑，不满意随时调。
-- 🔒 **隐私友好**：完全本地运行，不联网、不上传、不采集任何数据。
+SnapMark 是一个用 **Python + Pillow + tkinter** 写成的单文件截图标注工具，完全在本地运行，不联网、不上传、不安装后台服务。按下快捷键即可框选屏幕任意区域，配上一套简约美观的矢量工具栏进行标注，一键复制到剪贴板或保存为 PNG。
 
----
+所有图标、选框、标注元素均经过 **超采样抗锯齿 + 预乘 Alpha** 处理，边缘平滑无锯齿；箭头采用可弯折、可旋转的「彗星尾巴」造型。
 
-## 🖼️ 界面预览
+## 🎯 功能特性
+
+- **🎨 取色放大镜** — 框选前自带十字放大镜，实时显示 HEX / RGB 色值，**双击或 Ctrl+C** 复制色值。
+- **📐 丰富标注** — 矩形、圆角矩形、椭圆、箭头、马赛克、文字，六种工具随取随用。
+- **🏹 彗星箭头** — 平滑渐隐的彗星尾巴 + 中国古箭式倒刺箭头；拖动中心圆点可**弯折**成拐弯箭头，拖右上角 ↻ 可**整体旋转**方位。
+- **🟦 马赛克笔刷** — 支持**方形 / 圆形**两种笔刷、三档大小，涂抹即时打码，所见即所得。
+- **✍️ 精致文字** — 中文用 **黄令东齐伋体**、英文数字用 **California FB** 自动混排；支持 **Shift+Enter 多行**，输入框随内容自适应。
+- **🖌️ 三档粗细 + 调色板** — 6 种预设色 + 自定义取色；**选中任意带色要素即可点色块换色**。
+- **🖐️ 可视化编辑** — 元素悬停即显示点划虚线框与节点，可自由拖动、缩放、双击文字二次编辑。
+- **📋 输出** — ✓ 复制到剪贴板、💾 保存 PNG/JPG、↶ 撤销，Esc 随时退出。
+- **⚡ 单实例常驻** — 全局快捷键唤起，重复启动自动转为「再截一张」，可设开机自启。
 
 <div align="center">
-<img src="assets/toolbar.png" width="440" alt="工具栏">
+<img src="assets/preview_new.png" width="620" alt="工具栏与字体预览"><br>
+<sub>统一线性图标 · 平滑药丸工具栏 · 中英混排标注字体</sub>
+<br><br>
+<img src="assets/arrows.png" width="420" alt="可弯折的彗星箭头"><br>
+<sub>可任意弯折 / 旋转的彗星箭头</sub>
 </div>
 
-顶部圆角工具栏（Mac 风格柔和阴影 + 线条图标），下方是 **6 种预设颜色**与 **3 级粗细**。
+## 📦 安装
 
----
-
-## 🚀 快速开始
-
-### 环境要求
-- Windows 10 / 11
-- Python 3.9+（已安装 Pillow）
+需要 Python 3.9+（Windows）。
 
 ```bash
-pip install pillow
+git clone https://github.com/<your-name>/SnapMark.git
+cd SnapMark
+pip install -r requirements.txt
 ```
 
-### 运行
+> 依赖极简：仅 `Pillow`（`tkinter` 为 Python 标准库自带）。`numpy` 若存在会用于更高质量的抗锯齿缩放，缺失时自动降级。
+
+## 🚀 使用
 
 ```bash
+# 常驻后台，按快捷键截图（默认 Ctrl+Alt+`）
 python screenshot_tool.py
-```
 
-启动后常驻后台，按 **`Ctrl + Alt + `` **（反引号，Tab 上方那个键）即可截图。
-
-> 💡 想无黑框静默运行，用 `pythonw.exe screenshot_tool.py`（Windows 下不弹控制台）。
-
-### 立即截一次（不常驻）
-
-```bash
+# 立即截图一次后退出
 python screenshot_tool.py --shot
+
+# 自定义快捷键
+python screenshot_tool.py --hotkey "ctrl+shift+a"
 ```
 
-### 自定义快捷键
+Windows 下也可直接双击项目内的脚本：
 
-```bash
-python screenshot_tool.py --hotkey "ctrl+alt+q"
-```
+| 脚本 | 作用 |
+| --- | --- |
+| `启动截图工具.vbs` | 无窗口后台常驻启动（放进「启动」文件夹即可开机自启） |
+| `重启截图工具.vbs` | 一键结束旧实例并干净重启 |
+| `截图一次.bat` | 立即截图一次 |
+| `截图工具(带窗口).bat` | 带控制台窗口启动，便于查看日志 |
 
-支持 `ctrl` / `alt` / `shift` / `win` 组合 + 一个键；键可为：字母数字、`f1`~`f12`、
-以及 `` ` ``（反引号）、`pause`、`insert`、`scrolllock`、`space`、`printscreen` 等冷门键。
+## ⌨️ 快捷键
 
----
+| 按键 | 功能 |
+| --- | --- |
+| `Ctrl` + `Alt` + `` ` `` | 唤起截图（默认，可自定义） |
+| 双击 / `Ctrl` + `C` | 取色阶段复制色值 |
+| `Ctrl` + `C` | 编辑阶段复制截图到剪贴板 |
+| `Ctrl` + `S` | 保存到本地 |
+| `Ctrl` + `Z` | 撤销上一步标注 |
+| `Shift` + 拖拽 | 绘制正方形 / 正圆 / 正圆角矩形 |
+| `Shift` + `Enter` | 文字换行 |
+| `Esc` | 退出当前截图 |
 
-## 📖 使用说明
-
-### 全局
-
-| 操作 | 说明 |
-|------|------|
-| `Ctrl + Alt + `` | 唤起截图（默认，可自定义） |
-| 拖动鼠标 | 框选任意区域 |
-| 拖动绿色手柄 / 边框 | 缩放 / 移动选区 |
-
-### 标注工具
-
-| 工具 | 说明 |
-|------|------|
-| ▭ 矩形 · ◯ 椭圆 | 框选区域绘制 |
-| ↗ 箭头 | **彗星扫尾 + 头浓尾淡渐变** |
-| ✎ 画笔 | 自由手绘 |
-| ▨ 马赛克 | 打码遮挡敏感信息 |
-| T 文字 | 点击输入，回车确认；支持中文 |
-
-### 二次编辑
-
-| 操作 | 说明 |
-|------|------|
-| 悬停元素（手型光标）→ 拖动 | 移动已添加的元素 |
-| 文字右上角铅笔按钮 / 双击文字 | 重新编辑文字内容 |
-| 二级栏圆点 / 色块 | 切换粗细（细/中/粗）/ 颜色 |
-
-### 输出
-
-| 操作 | 说明 |
-|------|------|
-| ✓ 完成 / `Ctrl + C` | 复制到剪贴板，随处 `Ctrl + V` 粘贴 |
-| 💾 保存 / `Ctrl + S` | 另存为 PNG / JPG |
-| ↶ 撤销 / `Ctrl + Z` | 撤销上一步 |
-| ✕ 关闭 / `Esc` | 取消退出 |
-
----
-
-## ⚙️ 常驻与开机自启
-
-- **无窗口启动**：双击 `启动截图工具.vbs`（用 `pythonw` 静默运行，无黑框）。
-- **单实例设计**：程序只允许一个后台实例。已运行时再次启动（如双击快捷方式）会**直接触发一次截图**，不会产生重复进程。
-- **开机自启**：把 `启动截图工具.vbs` 的快捷方式放进启动文件夹
-  （`Win + R` → 输入 `shell:startup` → 回车 → 放入快捷方式）。
-- **干净重启**：双击 `重启截图工具.vbs`，结束旧实例并启动一个新的。
-
-> ⚠️ 仓库内的 `.vbs` 启动器中的 Python 路径为示例，请按你本机的 `pythonw.exe` 路径修改
-> （命令行执行 `where pythonw` 可查看）。
-
----
-
-## ❓ 常见问题
-
-<details>
-<summary><b>启动出现黑色命令框？</b></summary>
-
-用 `python.exe` 或 `.bat` 启动会带控制台。请改用 `pythonw.exe` 或 `.vbs` 启动，即无黑框。
-</details>
-
-<details>
-<summary><b>按快捷键没反应？</b></summary>
-
-该组合可能被其它软件占用。命令行运行会打印「注册失败」提示，换一个 `--hotkey` 即可。
-</details>
-
-<details>
-<summary><b>高分屏 / 多显示器坐标错位？</b></summary>
-
-程序已做 Per-Monitor DPI 感知，并按虚拟屏坐标截取，支持多屏与缩放显示。
-</details>
-
-<details>
-<summary><b>只能在 Windows 用吗？</b></summary>
-
-是。全局快捷键、剪贴板写入、DPI 感知均调用 Windows API，暂不支持 macOS / Linux。
-</details>
-
----
-
-## 🧩 技术亮点
-
-- **DPI 感知**：`SetProcessDpiAwareness` 保证 tkinter 坐标 = 物理像素 = 截图像素，高分屏不偏移。
-- **抗锯齿合成**：矢量标注在 4× 超采样图层绘制后 LANCZOS 缩小合成；文字用 1× 直绘保持字体自带抗锯齿。
-- **描边居中修正**：Pillow 描边向内扩半个线宽，与画布预览完全一致（真·所见即所得）。
-- **彗星箭头**：局部坐标逐列 alpha 渐变 + 旋转合成，尾部平滑淡出。
-- **剪贴板写入**：`ctypes` 直接写入 `CF_DIB`，无需额外依赖。
-- **全局快捷键**：`RegisterHotKey` + 消息循环独立线程，不抢占前台焦点。
-- **单实例通信**：回环 socket 加锁，第二次启动即通知主实例截图。
-
----
-
-## 📂 目录结构
+## 🗂️ 目录结构
 
 ```
 SnapMark/
-├── screenshot_tool.py       # 主程序（单文件）
-├── requirements.txt
-├── assets/                  # 预览图
-├── 启动截图工具.vbs          # 无窗口启动
-├── 重启截图工具.vbs          # 干净重启
-├── 截图一次.bat             # 截一次即退出
-├── 截图工具(带窗口).bat      # 带控制台，调试用
-└── README.md
+├─ screenshot_tool.py     # 主程序（单文件）
+├─ fonts/                 # 内置标注字体（随程序私有加载，无需系统安装）
+│  ├─ QijiFallback.ttf              # 黄令东齐伋体（中文）
+│  └─ PangMenZhengDaoCuShuTi.ttf    # 备用字体
+├─ icon/                  # 工具栏矢量图标（PNG）
+├─ assets/                # 预览图
+├─ requirements.txt
+└─ *.vbs / *.bat          # Windows 启动脚本
 ```
 
----
+## 🔤 字体与图标致谢
+
+- **黄令东齐伋体**、**庞门正道粗书体** 均来自开源免费字体合集 [wordshub/free-font](https://github.com/wordshub/free-font)，版权归原作者所有，仅随本项目内置用于文字标注渲染。
+- 工具栏图标为线性简约风格矢量图。
+
+> 若计划商用，请自行确认所用字体的授权范围。
 
 ## 🤝 贡献
 
-欢迎 Issue 与 PR：Bug 反馈、新工具（如 序号标签、长截图、OCR）、跨平台适配都很欢迎。
+欢迎提交 Issue 与 Pull Request：Bug 反馈、新标注工具、跨平台适配等都非常欢迎。提交前请确保 `python screenshot_tool.py --shot` 能正常运行。
 
 ## 📄 许可证
 
-本项目基于 [MIT License](LICENSE) 开源，可自由使用、修改、分发。
-
-<div align="center">
-
-如果 SnapMark 帮到了你，欢迎点一个 ⭐ Star 支持一下！
-
-</div>
+本项目基于 [MIT License](LICENSE) 开源。字体文件遵循其各自的原始授权。
