@@ -22,6 +22,8 @@ SnapMark 是一个用 **Python + Pillow + tkinter** 写成的单文件截图标�
 
 所有图标、选框、标注元素均经过 **超采样抗锯齿 + 预乘 Alpha** 处理，边缘平滑无锯齿；箭头采用可弯折、可旋转的「彗星尾巴」造型。
 
+> 💡 **无需依赖微信 / QQ 等聊天工具自带的截图功能**。SnapMark 提供全局快捷键，也支持 `--shot` 立即截一张——可以把它绑定到任意**快捷键软件或鼠标手势工具**上一键唤起，例如 AnyWhere 的 action ring、Quicker、AutoHotkey、罗技 / 雷蛇鼠标手势等，随手即截。
+
 ## 🎯 功能特性
 
 - **🎨 取色放大镜** — 框选前自带十字放大镜，实时显示 HEX / RGB 色值，**双击或 Ctrl+C** 复制色值。
@@ -37,9 +39,6 @@ SnapMark 是一个用 **Python + Pillow + tkinter** 写成的单文件截图标�
 <div align="center">
 <img src="assets/preview_new.png" width="620" alt="工具栏与字体预览"><br>
 <sub>统一线性图标 · 平滑药丸工具栏 · 中英混排标注字体</sub>
-<br><br>
-<img src="assets/arrows.png" width="420" alt="可弯折的彗星箭头"><br>
-<sub>可任意弯折 / 旋转的彗星箭头</sub>
 </div>
 
 ## 📦 安装
