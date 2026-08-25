@@ -108,12 +108,60 @@ SnapMark/
 └─ *.vbs / *.bat          # Windows 启动脚本
 ```
 
-## 🔤 字体与图标致谢
+## 📦 免安装版（Portable）
 
-- **黄令东齐伋体**、**庞门正道粗书体** 均来自开源免费字体合集 [wordshub/free-font](https://github.com/wordshub/free-font)，版权归原作者所有，仅随本项目内置用于文字标注渲染。
-- 工具栏图标为线性简约风格矢量图。
+在 [Releases](https://github.com/letitbejustgo-dot/SnapMark/releases) 下载打包好的 `SnapMark-portable.zip`，解压后**双击 `SnapMark.exe` 即用**，无需安装 Python 或任何依赖。
 
-> 若计划商用，请自行确认所用字体的授权范围。
+**自定义快捷键**：用记事本打开解压目录里的 `config.ini`，修改 `hotkey=` 一行后保存、重启程序即可：
+
+```ini
+# 修饰键：ctrl / alt / shift / win；主键：a-z、0-9、f1-f12、` - = 等
+hotkey=ctrl+alt+a
+```
+
+> 命令行参数 `--hotkey` 优先级高于 `config.ini`；两者都没有时用默认 `Ctrl+Alt+``。
+
+## 🔤 自定义字体（添加你喜欢的开源字体）
+
+文字工具内置 **思源宋体**、**站酷快乐体**，二者可在文字子栏下拉切换。你可以很方便地加入自己喜欢的开源字体：
+
+1. 把字体文件（`.ttf` / `.otf`）放进项目的 `fonts/` 目录；
+2. 打开 [`screenshot_tool.py`](screenshot_tool.py)，找到顶部的 `FONTS` 列表，按 `(显示名, 文件路径, tkinter族名)` 追加一项：
+
+   ```python
+   FONTS = [
+       ("思源宋体", _os.path.join(_FONT_DIR, "SourceHanSerifCN-Regular.ttf"), "思源宋体 CN"),
+       ("站酷快乐体", _os.path.join(_FONT_DIR, "ZhanKuKuaiLeTi.ttf"), "站酷快乐体2016修订版"),
+       ("你的字体", _os.path.join(_FONT_DIR, "YourFont.ttf"), "你的字体族名"),
+   ]
+   ```
+
+3. **族名**（第三个参数）是该字体在 Windows 中的家族名，用于 tkinter 实时预览。查看方法：
+
+   ```bash
+   python -c "from PIL import ImageFont; print(ImageFont.truetype('fonts/YourFont.ttf', 40).getname())"
+   ```
+
+   打印出的第一个字符串即族名（也可能是本地化中文名，可再用 `tkinter.font.families()` 核对）。填错不影响最终导出，只影响输入时的实时预览。
+
+4. 重启程序即可在文字下拉菜单看到新字体。默认字体是列表的第一项（`DEFAULT_FONT`），需要的话调整顺序即可。
+
+> 推荐从开源免费字体合集 [wordshub/free-font](https://github.com/wordshub/free-font)（或本项目所用 fork [letitbejustgo-dot/free-font](https://github.com/letitbejustgo-dot/free-font)）中挑选。商用前请自行确认字体授权范围。
+
+## 🛠️ 自行打包免安装版
+
+需要 [PyInstaller](https://pyinstaller.org/)。仓库已提供 `build_portable.bat`，双击或命令行运行即可在 `dist/` 生成便携版：
+
+```bash
+pip install pyinstaller
+build_portable.bat
+```
+
+打包时会把 `fonts/`、`icon/` 一并内置，并把 `config.ini` 放到 exe 同目录供用户编辑。
+
+## 🔤 图标致谢
+
+工具栏图标为线性简约风格矢量图；内置字体版权归各自原作者所有，仅随本项目用于文字标注渲染。
 
 ## 🤝 贡献
 

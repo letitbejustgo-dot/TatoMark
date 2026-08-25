@@ -45,87 +45,102 @@ except Exception:
 CN_FONT_PATH = "C:/Windows/Fonts/msyh.ttc"          # UI 文案（提示/尺寸/toast）
 CN_FONT_FAMILY = "Microsoft YaHei"
 
-# 截图标注「文字」工具：中文用「黄令东齐伋体」，英文/数字用「California FB」
-# 中文字体随项目内置（无需系统安装，私有注册）；California FB 为系统自带。
+# 截图标注「文字」工具：内置可下拉选择的字体（随项目私有注册，无需系统安装）
 import os as _os
-_FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts")
-CN_TEXT_FONT_PATH = _os.path.join(_FONT_DIR, "QijiFallback.ttf")   # 黄令东齐伋体
-CN_TEXT_FONT_FAMILY = "QIJIFALLBACK"
-EN_TEXT_FONT_PATH = "C:/Windows/Fonts/CALIFR.TTF"                  # Californian FB
-EN_TEXT_FONT_FAMILY = "Californian FB"
-# tkinter 实时输入/预览用单一族名（中文为主，拉丁字符由 Tk 自动回退）
-TEXT_FONT_FAMILY = CN_TEXT_FONT_FAMILY
-_CN_FONT_CACHE = {}
-_EN_FONT_CACHE = {}
+
+
+def _app_base():
+    """资源目录：PyInstaller onefile 打包时为解压临时目录，否则为脚本目录。"""
+    return getattr(sys, "_MEIPASS", _os.path.dirname(_os.path.abspath(__file__)))
+
+
+def _exe_dir():
+    """可执行文件/脚本所在目录（用于读取用户可编辑的 config.ini）。"""
+    if getattr(sys, "frozen", False):
+        return _os.path.dirname(sys.executable)
+    return _os.path.dirname(_os.path.abspath(__file__))
+
+
+_FONT_DIR = _os.path.join(_app_base(), "fonts")
+# (显示名, 文件路径, tkinter 族名)
+FONTS = [
+    ("思源宋体", _os.path.join(_FONT_DIR, "SourceHanSerifCN-Regular.ttf"),
+     "思源宋体 CN"),
+    ("站酷快乐体", _os.path.join(_FONT_DIR, "ZhanKuKuaiLeTi.ttf"),
+     "站酷快乐体2016修订版"),
+]
+DEFAULT_FONT = FONTS[0][1]
+_FONT_CACHE = {}
 
 
 def register_text_font():
-    """把内置中文字体私有注册进当前进程，使 tkinter 也能按族名渲染（无需管理员）。"""
-    try:
-        ctypes.windll.gdi32.AddFontResourceExW(
-            ctypes.c_wchar_p(CN_TEXT_FONT_PATH), 0x10, 0)
-    except Exception as ex:
-        print("字体注册失败（将回退系统字体）：", ex)
-
-
-def _load_font(cache, path, size):
-    fnt = cache.get(size)
-    if fnt is None:
+    for _n, p, _f in FONTS:
         try:
-            fnt = ImageFont.truetype(path, size)
+            ctypes.windll.gdi32.AddFontResourceExW(ctypes.c_wchar_p(p), 0x10, 0)
+        except Exception as ex:
+            print("字体注册失败（将回退系统字体）：", ex)
+
+
+def get_font(path, size):
+    key = (path, size)
+    f = _FONT_CACHE.get(key)
+    if f is None:
+        try:
+            f = ImageFont.truetype(path, size)
         except Exception:
             try:
-                fnt = ImageFont.truetype(CN_FONT_PATH, size)
+                f = ImageFont.truetype(CN_FONT_PATH, size)
             except Exception:
-                fnt = ImageFont.load_default()
-        cache[size] = fnt
-    return fnt
+                f = ImageFont.load_default()
+        _FONT_CACHE[key] = f
+    return f
 
 
-def get_cn_font(size):
-    return _load_font(_CN_FONT_CACHE, CN_TEXT_FONT_PATH, size)
+def family_of(path):
+    for _n, p, fam in FONTS:
+        if p == path:
+            return fam
+    return CN_FONT_FAMILY
 
 
-def get_en_font(size):
-    return _load_font(_EN_FONT_CACHE, EN_TEXT_FONT_PATH, size)
+def name_of(path):
+    for n, p, _f in FONTS:
+        if p == path:
+            return n
+    return "字体"
 
 
-def _is_latin(ch):
-    """ASCII 拉丁字符（含数字/标点/空格）→ 英文字体；其余（中文等）→ 中文字体。"""
-    return ch.isascii()
-
-
-def _line_width(line, cn, en):
-    return sum((en if _is_latin(ch) else cn).getlength(ch) for ch in line)
-
-
-def measure_mixed(text, size):
-    """中英混排 / 多行 测量：返回 (宽, 高, 单行行高 lineh, 基线上高 ascent)。"""
+def measure_text(text, size, path=DEFAULT_FONT):
+    """单字体 / 多行 测量：返回 (宽, 高, 单行行高 lineh, 基线上高 ascent)。"""
     if text == "":
         text = " "
-    cn, en = get_cn_font(size), get_en_font(size)
-    ca, ea = cn.getmetrics(), en.getmetrics()
-    ascent = max(ca[0], ea[0])
-    lineh = ascent + max(ca[1], ea[1])
+    f = get_font(path, size)
+    asc, desc = f.getmetrics()
+    lineh = asc + desc
     lines = text.split("\n")
-    w = max((_line_width(ln or " ", cn, en) for ln in lines), default=1.0)
-    return int(round(w)), lineh * len(lines), lineh, ascent
+    w = max((f.getlength(ln or " ") for ln in lines), default=1.0)
+    return int(round(w)), lineh * len(lines), lineh, asc
+
+
+def draw_text_multi(draw, x, y, text, fill, size, path=DEFAULT_FONT):
+    """单字体 / 多行 绘制：(x, y) 为左上角。"""
+    f = get_font(path, size)
+    asc, desc = f.getmetrics()
+    lineh = asc + desc
+    for i, line in enumerate(text.split("\n")):
+        draw.text((x, y + i * lineh), line, fill=fill, font=f)
+
+
+# 兼容旧调用名（外部预览脚本用 5 参形式，走默认字体）
+def measure_mixed(text, size):
+    return measure_text(text, size, DEFAULT_FONT)
 
 
 def draw_mixed(draw, x, y, text, fill, size):
-    """中英混排 / 多行 绘制：(x, y) 为左上角，逐字符按语言选字体、对齐基线。"""
-    cn, en = get_cn_font(size), get_en_font(size)
-    ca, ea = cn.getmetrics(), en.getmetrics()
-    ascent = max(ca[0], ea[0])
-    lineh = ascent + max(ca[1], ea[1])
-    for i, line in enumerate(text.split("\n")):
-        cx = x
-        baseline = y + ascent + i * lineh
-        for ch in line:
-            f = en if _is_latin(ch) else cn
-            draw.text((cx, baseline), ch, fill=fill, font=f, anchor="ls")
-            cx += f.getlength(ch)
+    draw_text_multi(draw, x, y, text, fill, size, DEFAULT_FONT)
 
+
+TEXT_FONT_FAMILY = family_of(DEFAULT_FONT)
 
 register_text_font()
 
@@ -135,9 +150,16 @@ RED = "#F5453A"
 PILL_BG = "#FFFFFF"
 
 PRESET_COLORS = ["#3B9EFF", "#5FCE3B", "#FFB020", "#3A3F44", "#FFFFFF", "#FF5B5B"]
-LEVELS = [(2, 18), (6, 34), (14, 58)]   # (线宽, 字号) —— 三档差距加大
-MOSAIC_BRUSH = [18, 34, 56]             # 马赛克笔刷直径（三档）
+LEVELS = [(3, 27), (9, 51), (21, 87)]   # (线宽, 字号) —— 三档再扩 0.5 倍
+MOSAIC_BRUSH = [27, 51, 84]             # 马赛克笔刷直径（三档，再扩 0.5 倍）
 SS = 4                                   # 图标超采样
+UI = 2                                    # 界面整体缩放倍数（工具栏/取色框放大）
+
+TOOL_NAMES = {
+    "rect": "矩形", "rrect": "圆角矩形", "ellipse": "椭圆", "arrow": "箭头",
+    "mosaic": "马赛克", "text": "文字", "undo": "撤销", "save": "保存",
+    "close": "取消", "confirm": "完成(复制)",
+}
 
 PINS = []
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
@@ -259,6 +281,48 @@ def image_to_clipboard(img):
     finally:
         user32.CloseClipboard()
     return True
+
+
+def text_to_clipboard(text):
+    """把文本放入系统剪贴板（CF_UNICODETEXT，独立于 tk，覆盖窗关闭后仍在）。"""
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    GMEM_MOVEABLE, CF_UNICODETEXT = 0x0002, 13
+    h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not h:
+        return False
+    p = kernel32.GlobalLock(h)
+    ctypes.memmove(p, data, len(data))
+    kernel32.GlobalUnlock(h)
+    if not user32.OpenClipboard(None):
+        return False
+    try:
+        user32.EmptyClipboard()
+        user32.SetClipboardData(CF_UNICODETEXT, h)
+    finally:
+        user32.CloseClipboard()
+    return True
+
+
+def send_ctrl_v():
+    """向当前前台窗口发送 Ctrl+V，在光标/焦点处粘贴剪贴板内容。"""
+    try:
+        u = ctypes.windll.user32
+        VK_CONTROL, VK_V, KEYUP = 0x11, 0x56, 0x0002
+        u.keybd_event(VK_CONTROL, 0, 0, 0)
+        u.keybd_event(VK_V, 0, 0, 0)
+        u.keybd_event(VK_V, 0, KEYUP, 0)
+        u.keybd_event(VK_CONTROL, 0, KEYUP, 0)
+    except Exception:
+        pass
 
 
 def _lerp(a, b, t):
@@ -463,7 +527,7 @@ def _smooth_resize(im, size):
 
 
 # 工具/动作 → icon 文件夹内的 PNG 文件名
-_ICON_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "icon")
+_ICON_DIR = _os.path.join(_app_base(), "icon")
 _ICON_FILE = {
     "rect": "直方框.png", "rrect": "圆角方框.png", "ellipse": "圆圈.png",
     "arrow": "长箭头-右上.png", "mosaic": "马赛克.png", "text": "文本块.png",
@@ -502,7 +566,7 @@ def render_icon(name, px=32, state="normal"):
                             radius=8 * SS, fill=(225, 246, 234, 255))
 
     # 统一视觉尺寸：把裁剪后的图标按比例塞进居中的目标框
-    target = 20 * SS                       # 32px 按钮内约 20px 图标
+    target = 30 * SS                       # 图标在按钮内占比更大（再放大 2 号）
     src = _load_icon_src(name)
     sw, sh = src.size
     k = target / float(max(sw, sh))
@@ -579,16 +643,17 @@ def render_pencil(px=22):
     return render_badge("edit", px)
 
 
-def render_pill(w, h, seps):
-    """圆角白色药丸 + 柔和阴影，返回 (PhotoImage, margin)。
-    药丸主体与分隔线以 SS 倍超采样绘制后再缩小，边缘平滑无锯齿。"""
+def render_pill(w, h, seps, radius=None):
+    """圆角白色药丸 + 柔和阴影，返回 (PhotoImage, margin)。radius 默认半高(胶囊)。"""
+    if radius is None:
+        radius = h // 2
     M = 16
     W, Hh = w + 2 * M, h + 2 * M
 
     # 阴影：模糊后本身即平滑，1x 绘制即可
     shadow = Image.new("RGBA", (W, Hh), (0, 0, 0, 0))
     ds = ImageDraw.Draw(shadow)
-    ds.rounded_rectangle([M, M + 3, M + w, M + h + 3], radius=h // 2,
+    ds.rounded_rectangle([M, M + 3, M + w, M + h + 3], radius=radius,
                          fill=(0, 0, 0, 55))
     shadow = shadow.filter(ImageFilter.GaussianBlur(7))
     base = Image.alpha_composite(Image.new("RGBA", (W, Hh), (0, 0, 0, 0)),
@@ -601,7 +666,7 @@ def render_pill(w, h, seps):
     big = Image.new("RGBA", (W * ss, Hh * ss), (255, 255, 255, 0))
     db = ImageDraw.Draw(big)
     db.rounded_rectangle([M * ss, M * ss, (M + w) * ss, (M + h) * ss],
-                         radius=(h // 2) * ss, fill=(255, 255, 255, 255),
+                         radius=radius * ss, fill=(255, 255, 255, 255),
                          outline=(228, 230, 234, 255), width=ss)
     for cx in seps:
         db.line([(M + cx) * ss, (M + 10) * ss, (M + cx) * ss, (M + h - 10) * ss],
@@ -708,6 +773,11 @@ class ScreenshotTool:
         # 变暗背景（point 比 blend 略快，且不额外分配整幅黑图）
         self.dim_img = self.full_img.point(lambda p: int(p * 0.5))
 
+        # 磁吸：在创建覆盖窗之前枚举当前可见窗口（此时覆盖窗尚未遮挡）
+        self._enum_top_windows()
+        self._child_cache = {}
+        self._snap_rect = None
+
         self.overlay = tk.Toplevel(self.root)
         self.overlay.overrideredirect(True)
         self.overlay.geometry(f"{self.vw}x{self.vh}+{self.vx}+{self.vy}")
@@ -732,6 +802,7 @@ class ScreenshotTool:
         self._pencil_img = None
         self._rotate_img = None
         self.mosaic_shape = "rect"
+        self.font_path = DEFAULT_FONT
         self.text_entry = None
         self.tool = None
         self.annotations = []
@@ -747,6 +818,7 @@ class ScreenshotTool:
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
         self.canvas.bind("<Motion>", self.on_hover)
         self.canvas.bind("<Double-Button-1>", self.on_double)
+        self.canvas.bind("<Button-3>", self.on_rclick)   # 右键取色
         # bind_all + 逐控件绑定，双保险保证 Esc/快捷键在任意焦点下都能触发
         for tgt in (self.overlay.bind_all, self.overlay.bind, self.canvas.bind):
             tgt("<Escape>", lambda e: self.cancel())
@@ -756,20 +828,39 @@ class ScreenshotTool:
         self.overlay.focus_force()
         self.canvas.focus_set()
         self.root.after(60, self._poll_keys)      # Esc 轮询兜底
+        self.root.after(40, self._initial_hover)  # 启动即显示取色镜/吸附
+
+    def _initial_hover(self):
+        """无需等鼠标移动，进入即在当前光标处显示取色放大镜与磁吸高亮。"""
+        if not self.active or self.overlay is None or self.mode != "select":
+            return
+        try:
+            pt = wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            x, y = pt.x - self.vx, pt.y - self.vy
+            if 0 <= x < self.vw and 0 <= y < self.vh:
+                try:
+                    self._update_snap(x, y)
+                except Exception:
+                    pass
+                self._update_magnifier(x, y)
+        except Exception:
+            pass
 
         self.pick_hex = None
         self._mag_photo = None
         self.hint = self.canvas.create_text(
             self.vw // 2, 34,
-            text="拖动鼠标框选区域    ·    移动十字放大镜取色，双击 / Ctrl+C 复制色值"
-                 "    ·    Esc 取消",
-            fill="#EEEEEE", font=(CN_FONT_FAMILY, -17))
+            text="移动自动吸附窗口/模块，单击选取；拖动可自定义框选    ·    "
+                 "放大镜取色，右键复制色值    ·    Esc 取消",
+            fill="#EEEEEE", font=(CN_FONT_FAMILY, -15 * UI))
 
     # ---------------- 选区阶段 ----------------
     def on_press(self, e):
         if self.mode == "select":
             self.start_pt = (e.x, e.y)
             self.canvas.delete("mag")
+            self.canvas.delete("snap")
         else:
             self.edit_press(e)
 
@@ -808,7 +899,22 @@ class ScreenshotTool:
         l, t = min(x0, e.x), min(y0, e.y)
         r, b = max(x0, e.x), max(y0, e.y)
         if r - l < 8 or b - t < 8:
-            # 视为一次点击（非框选）：复位以便放大镜取色继续工作
+            # 视为一次点击：若命中磁吸窗口/模块 → 直接选取该区域
+            snap = getattr(self, "_snap_rect", None)
+            if snap:
+                sl, st = max(0, int(snap[0])), max(0, int(snap[1]))
+                sr, sb = min(self.vw, int(snap[2])), min(self.vh, int(snap[3]))
+                if sr - sl > 8 and sb - st > 8:
+                    self.sel = [sl, st, sr, sb]
+                    self.mode = "edit"
+                    self.canvas.delete(self.hint)
+                    self.canvas.delete("sel")
+                    self.canvas.delete("mag")
+                    self.canvas.delete("snap")
+                    self.build_toolbar()
+                    self.redraw_static()
+                    self.start_pt = None
+                    return
             self.start_pt = None
             return
         self.sel = [l, t, r, b]
@@ -816,6 +922,7 @@ class ScreenshotTool:
         self.canvas.delete(self.hint)
         self.canvas.delete("sel")
         self.canvas.delete("mag")
+        self.canvas.delete("snap")
         self.build_toolbar()
         self.redraw_static()
 
@@ -868,7 +975,8 @@ class ScreenshotTool:
             return (min(xs), min(ys), max(xs), max(ys))
         if t == "text":
             x, y = a["coords"]
-            w, h = self._text_size(a["text"], a["font_size"])
+            w, h, _lh, _a = measure_text(a["text"], a["font_size"],
+                                         a.get("font", DEFAULT_FONT))
             return (x, y, x + w, y + h)
         return (0, 0, 0, 0)
 
@@ -901,7 +1009,7 @@ class ScreenshotTool:
         if self.annotations[idx]["type"] != "text":
             return
         if not hasattr(self, "_pencil_img") or self._pencil_img is None:
-            self._pencil_img = render_pencil(22)
+            self._pencil_img = render_pencil(22 * UI)
         bx0, by0, bx1, by1 = self._anno_bbox(self.annotations[idx])
         self.canvas.create_image(bx1, by0, image=self._pencil_img,
                                  tags="editbtn")
@@ -952,7 +1060,7 @@ class ScreenshotTool:
         # 细长的「长划 + 点」虚线（dash-dot），比例更精致
         self.canvas.create_rectangle(bx0, by0, bx1, by1, outline=col,
                                      width=2, dash=(16, 5, 2, 5), tags="movebox")
-        nsz = 3.0                                             # 圆形节点半径,小巧
+        nsz = 3.0 * UI                                        # 圆形节点半径
         mx, my = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
         for nx, ny in [(bx0, by0), (mx, by0), (bx1, by0), (bx1, my),
                        (bx1, by1), (mx, by1), (bx0, by1), (bx0, my)]:
@@ -962,12 +1070,13 @@ class ScreenshotTool:
         if a["type"] == "arrow":
             # 结构中心实心圆点：在方框内拖动它即可改变箭头弯折形状
             dx, dy = self._arrow_dot(a)
-            self.canvas.create_oval(dx - 5, dy - 5, dx + 5, dy + 5,
+            rd = 5 * UI
+            self.canvas.create_oval(dx - rd, dy - rd, dx + rd, dy + rd,
                                     fill=ACCENT, outline="white", width=1,
                                     tags="movebox")
             # 右上角旋转手柄（顺时针方向.png）：拖动可整体旋转箭头方位
             if not hasattr(self, "_rotate_img") or self._rotate_img is None:
-                self._rotate_img = render_badge("rotate", 22)
+                self._rotate_img = render_badge("rotate", 22 * UI)
             hx, hy = self._rotate_handle_pos(idx)
             self.canvas.create_image(hx, hy, image=self._rotate_img,
                                      tags="movebox")
@@ -979,9 +1088,106 @@ class ScreenshotTool:
         y = min(max(int(y), 0), self.vh - 1)
         return self.full_img.getpixel((x, y))[:3]
 
+    # ---------------- 窗口/模块 磁吸 ----------------
+    def _win_rect_dwm(self, hwnd):
+        """优先取 DWM 真实边界（去掉 Win10/11 的隐形阴影边框）。"""
+        rc = wintypes.RECT()
+        try:
+            if ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                    ctypes.c_void_p(hwnd), 9, ctypes.byref(rc),
+                    ctypes.sizeof(rc)) == 0 and rc.right > rc.left:
+                return rc
+        except Exception:
+            pass
+        ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rc))
+        return rc
+
+    def _enum_top_windows(self):
+        user32 = ctypes.windll.user32
+        rects = []
+        PROTO = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                                   ctypes.c_void_p)
+
+        def cb(hwnd, lparam):
+            try:
+                if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                    return True
+                rc = self._win_rect_dwm(hwnd)
+                w, h = rc.right - rc.left, rc.bottom - rc.top
+                if w < 80 or h < 60:
+                    return True
+                rects.append((rc.left, rc.top, rc.right, rc.bottom, hwnd))
+            except Exception:
+                pass
+            return True
+
+        try:
+            user32.EnumWindows(PROTO(cb), 0)
+        except Exception:
+            pass
+        self.snap_top = rects            # Z 序：最前的窗口在前
+
+    def _children_of(self, hwnd):
+        if hwnd in self._child_cache:
+            return self._child_cache[hwnd]
+        user32 = ctypes.windll.user32
+        res = []
+        PROTO = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                                   ctypes.c_void_p)
+
+        def cb(ch, lparam):
+            try:
+                if not user32.IsWindowVisible(ch):
+                    return True
+                rc = wintypes.RECT()
+                user32.GetWindowRect(ch, ctypes.byref(rc))
+                w, h = rc.right - rc.left, rc.bottom - rc.top
+                if w < 48 or h < 24:
+                    return True
+                res.append((rc.left, rc.top, rc.right, rc.bottom))
+            except Exception:
+                pass
+            return True
+
+        try:
+            user32.EnumChildWindows(hwnd, PROTO(cb), 0)
+        except Exception:
+            pass
+        self._child_cache[hwnd] = res
+        return res
+
+    def _snap_candidate(self, x, y):
+        """返回光标就近的窗口/模块矩形（画布坐标），无则 None。"""
+        if not getattr(self, "snap_top", None):
+            return None
+        ax, ay = x + self.vx, y + self.vy
+        for (l, t, r, b, hwnd) in self.snap_top:
+            if l <= ax <= r and t <= ay <= b:
+                best = (l, t, r, b)
+                barea = (r - l) * (b - t)
+                for (cl, ct, cr, cb) in self._children_of(hwnd):
+                    if cl <= ax <= cr and ct <= ay <= cb:
+                        a = (cr - cl) * (cb - ct)
+                        if 600 < a < barea:      # 更小的模块（且非极小控件）
+                            best, barea = (cl, ct, cr, cb), a
+                return (best[0] - self.vx, best[1] - self.vy,
+                        best[2] - self.vx, best[3] - self.vy)
+        return None
+
+    def _update_snap(self, x, y):
+        self.canvas.delete("snap")
+        rc = self._snap_candidate(x, y)
+        self._snap_rect = rc
+        if rc is None:
+            return
+        l, t, r, b = rc
+        self.canvas.create_rectangle(l, t, r, b, outline=ACCENT, width=2 * UI,
+                                     tags="snap")
+        self.canvas.tag_raise("snap")
+
     def _update_magnifier(self, x, y):
         self.canvas.delete("mag")
-        Z, half = 9, 8                       # 放大倍数 / 采样半径
+        Z, half = 8 * UI, 8                  # 放大倍数 / 采样半径（整体放大）
         n = 2 * half + 1
         D = n * Z
         reg = Image.new("RGB", (n, n), (20, 20, 20))
@@ -997,28 +1203,34 @@ class ScreenshotTool:
         # 绿色十字虚线准星（与大多数背景色可区分）+ 中心像素高亮
         cxl = mid + Z // 2
         for a0 in range(0, D, 6):                      # 虚线
-            d.line([cxl, a0, cxl, min(a0 + 3, D)], fill=GREEN, width=1)
-            d.line([a0, cxl, min(a0 + 3, D), cxl], fill=GREEN, width=1)
+            d.line([cxl, a0, cxl, min(a0 + 3, D)], fill=GREEN, width=UI)
+            d.line([a0, cxl, min(a0 + 3, D), cxl], fill=GREEN, width=UI)
         d.rectangle([mid, mid, mid + Z - 1, mid + Z - 1], outline=GREEN, width=2)
-        d.rectangle([0, 0, D - 1, D - 1], outline=(255, 255, 255), width=2)
-        d.rectangle([1, 1, D - 2, D - 2], outline=(40, 40, 40), width=1)
+        d.rectangle([0, 0, D - 1, D - 1], outline=(255, 255, 255), width=2*UI)
+        d.rectangle([UI, UI, D-1-UI, D-1-UI], outline=(40, 40, 40), width=1)
         # 信息面板（浅色底）：两行黑字色号（HEX / RGB）+ 一行灰字提示
         rgb = self._pick_color_at(x, y)
         hexs = "#%02X%02X%02X" % rgb
         self.pick_hex = hexs
-        panelH = 62
+        pdx = 8 * UI
+        lh = 19 * UI
+        panelH = int(3.4 * lh)
         full = Image.new("RGB", (D, D + panelH), (245, 246, 248))
         full.paste(disp, (0, 0))
         pd = ImageDraw.Draw(full)
-        pd.rectangle([8, D + 8, 26, D + 26], fill=rgb, outline=(160, 160, 160))
+        pd.rectangle([pdx, D + pdx, pdx + 18*UI, D + pdx + 18*UI], fill=rgb,
+                     outline=(160, 160, 160))
         try:
-            f1 = ImageFont.truetype(CN_FONT_PATH, 14)
-            f2 = ImageFont.truetype(CN_FONT_PATH, 12)
+            f1 = ImageFont.truetype(CN_FONT_PATH, 14 * UI)
+            f2 = ImageFont.truetype(CN_FONT_PATH, 12 * UI)
         except Exception:
             f1 = f2 = ImageFont.load_default()
-        pd.text((34, D + 7), hexs, fill=(20, 20, 20), font=f1)
-        pd.text((34, D + 26), "RGB %d, %d, %d" % rgb, fill=(20, 20, 20), font=f1)
-        pd.text((34, D + 45), "双击复制色值", fill=(140, 140, 140), font=f2)
+        tx0 = pdx + 22 * UI
+        pd.text((tx0, D + 6*UI), hexs, fill=(20, 20, 20), font=f1)
+        pd.text((tx0, D + 6*UI + lh), "RGB %d, %d, %d" % rgb, fill=(20, 20, 20),
+                font=f1)
+        pd.text((tx0, D + 6*UI + 2*lh), "右键复制色值", fill=(140, 140, 140),
+                font=f2)
         self._mag_photo = ImageTk.PhotoImage(full)
         ox, oy = x + 20, y + 20
         if ox + D > self.vw:
@@ -1032,7 +1244,11 @@ class ScreenshotTool:
     # ---------------- 悬停 ----------------
     def on_hover(self, e):
         if self.mode == "select" and not self.start_pt:
-            self._update_magnifier(e.x, e.y)
+            try:
+                self._update_snap(e.x, e.y)
+            except Exception:
+                pass
+            self._update_magnifier(e.x, e.y)   # 取色放大镜始终显示
             return
         if self.mode != "edit" or self.drag_mode:
             return
@@ -1082,14 +1298,15 @@ class ScreenshotTool:
         else:
             self.overlay.configure(cursor="left_ptr")
 
-    def on_double(self, e):
-        # 取色阶段：双击复制色值后自动退出工具
+    def on_rclick(self, e):
+        # 取色阶段：右键取色 → 复制色值 + 退出工具 + 在光标处自动粘贴
         if self.mode == "select":
-            hexs = self.pick_hex
-            if hexs and self._set_clipboard_text(hexs):
-                self.finish()
-                self.flash_toast(f"已复制色值 {hexs}")
-            return
+            self.pick_hex = "#%02X%02X%02X" % self._pick_color_at(e.x, e.y)
+            if self._set_clipboard_text(self.pick_hex):
+                self._finish_and_paste()
+                self.flash_toast(f"已复制并粘贴色值 {self.pick_hex}")
+
+    def on_double(self, e):
         if self.mode != "edit":
             return
         for i in range(len(self.annotations) - 1, -1, -1):
@@ -1545,23 +1762,24 @@ class ScreenshotTool:
             self.redraw_static()
 
     # ---------------- 文字 ----------------
-    def place_text_entry(self, x, y, text="", color=None, fs=None):
+    def place_text_entry(self, x, y, text="", color=None, fs=None, font=None):
         self.commit_text_entry()
         x, y = self._clamp(x, y)
         color = color or self.color
         fs = fs or self.font_size
+        font = font or self.font_path
         txt = tk.Text(self.overlay, bd=0, bg="#FFFFFF", fg=color,
-                      insertbackground=color, font=(TEXT_FONT_FAMILY, -fs),
+                      insertbackground=color, font=(family_of(font), -fs),
                       wrap="none", highlightthickness=0, padx=0, pady=0)
         if text:
             txt.insert("1.0", text)
-        _w0, _h0, lineh, _asc = measure_mixed(text or " ", fs)
+        _w0, _h0, lineh, _asc = measure_text(text or " ", fs, font)
         # 初始宽度与光标高度一致（正方形起始框），随输入扩充
         ew = self.canvas.create_window(x, y, anchor="nw", window=txt,
                                        width=lineh + 2, height=lineh + 2)
         txt.focus_set()
         txt.mark_set("insert", "end")
-        self.text_entry = (txt, x, y, ew, color, fs)
+        self.text_entry = (txt, x, y, ew, color, fs, font)
         # 回车提交；Shift+回车换行
         txt.bind("<Return>", self._text_commit_key)
         txt.bind("<Shift-Return>", self._text_newline_key)
@@ -1582,9 +1800,9 @@ class ScreenshotTool:
         """输入过程中始终显示虚线定位框；默认 2 个中文字宽，随输入扩充。"""
         if not self.text_entry:
             return
-        txt, x, y, ew, color, fs = self.text_entry
+        txt, x, y, ew, color, fs, font = self.text_entry
         content = txt.get("1.0", "end-1c")
-        w, h, lineh, _asc = measure_mixed(content if content else " ", fs)
+        w, h, lineh, _asc = measure_text(content if content else " ", fs, font)
         ww = max(lineh, w) + 4          # 初始≈光标高度的方框，随内容加宽
         hh = lineh * (content.count("\n") + 1) + 2
         self.canvas.itemconfigure(ew, width=ww, height=hh)
@@ -1597,12 +1815,13 @@ class ScreenshotTool:
         a = self.annotations.pop(idx)
         self.redraw_static()
         x, y = a["coords"]
-        self.place_text_entry(x, y, a["text"], a["color"], a["font_size"])
+        self.place_text_entry(x, y, a["text"], a["color"], a["font_size"],
+                              a.get("font", DEFAULT_FONT))
 
     def commit_text_entry(self):
         if not self.text_entry:
             return
-        txt, x, y, ew, color, fs = self.text_entry
+        txt, x, y, ew, color, fs, font = self.text_entry
         text = txt.get("1.0", "end-1c")
         self.canvas.delete(ew)
         self.canvas.delete("textbox")
@@ -1611,13 +1830,14 @@ class ScreenshotTool:
         if text.strip():
             self.annotations.append({"type": "text", "coords": (x, y),
                                      "text": text, "color": color,
-                                     "font_size": fs})
+                                     "font_size": fs, "font": font})
+            self.selected_idx = len(self.annotations) - 1
             self.redraw_static()
 
     def cancel_text_entry(self):
         if not self.text_entry:
             return
-        txt, x, y, ew, color, fs = self.text_entry
+        txt, x, y, ew, color, fs, font = self.text_entry
         self.canvas.delete(ew)
         self.canvas.delete("textbox")
         txt.destroy()
@@ -1716,7 +1936,8 @@ class ScreenshotTool:
             if a["type"] != "text":
                 continue
             x, y = a["coords"]
-            draw_mixed(dt, x - ox, y - oy, a["text"], a["color"], a["font_size"])
+            draw_text_multi(dt, x - ox, y - oy, a["text"], a["color"],
+                            a["font_size"], a.get("font", DEFAULT_FONT))
         return result.convert("RGB")
 
     @staticmethod
@@ -1744,8 +1965,9 @@ class ScreenshotTool:
         self.canvas.delete("sel")
         self.canvas.create_rectangle(l, t, r, b, outline=ACCENT, width=2,
                                      tags="sel")
+        hs = 4 * UI
         for hx, hy in self.handle_points().values():
-            self.canvas.create_rectangle(hx - 5, hy - 5, hx + 5, hy + 5,
+            self.canvas.create_rectangle(hx - hs, hy - hs, hx + hs, hy + hs,
                                          fill="white", outline=ACCENT,
                                          width=2, tags="sel")
         self._size_label(l, t, r, b, "sel")
@@ -1804,17 +2026,18 @@ class ScreenshotTool:
             x, y = a["coords"]
             self.canvas.create_text(x, y, anchor="nw", text=a["text"],
                                     fill=a["color"],
-                                    font=(TEXT_FONT_FAMILY, -a["font_size"]),
+                                    font=(family_of(a.get("font", DEFAULT_FONT)),
+                                          -a["font_size"]),
                                     tags=tag)
 
     def _size_label(self, l, t, r, b, tag):
         text = f"{r - l} × {b - t}"
-        ly = t - 24 if t > 30 else t + 8
+        ly = t - 14 * UI if t > 30 else t + 8
         self.canvas.create_text(l + 1, ly + 1, anchor="nw", text=text,
-                                fill="#000000", font=(CN_FONT_FAMILY, -14),
+                                fill="#000000", font=(CN_FONT_FAMILY, -13 * UI),
                                 tags=tag)
         self.canvas.create_text(l, ly, anchor="nw", text=text, fill="#FFFFFF",
-                                font=(CN_FONT_FAMILY, -14), tags=tag)
+                                font=(CN_FONT_FAMILY, -13 * UI), tags=tag)
 
     def undo(self):
         if self.text_entry:
@@ -1848,7 +2071,8 @@ class ScreenshotTool:
                   ("sep",),
                   ("act", "close"), ("act", "confirm")]
 
-        btn, gap, sep_w, pad = 32, 4, 15, 10
+        # 加大按钮间距使整体长度约再扩 0.5 倍
+        btn, gap, sep_w, pad = 32*UI, 18*UI, 26*UI, 16*UI
         width = pad
         seps = []
         positions = []
@@ -1866,13 +2090,13 @@ class ScreenshotTool:
         # 工具栏默认放在选区「右下方」（下方需容纳工具栏+子栏）
         tx = min(max(r - width, 8), self.vw - width - 8)
         ty = b + 14
-        if ty + height + 52 > self.vh - 8:      # 下方放不下 → 放到上方
+        if ty + height + 56*UI > self.vh - 8:   # 下方放不下 → 放到上方
             ty = t - height - 14
             if ty < 8:                          # 上方也放不下 → 夹在可视范围
                 ty = max(8, min(b + 14, self.vh - height - 8))
         self._tb_pos = (tx, ty, width, height)
 
-        pill, M = render_pill(width, height, seps)
+        pill, M = render_pill(width, height, seps, radius=16 * UI)  # 圆角更小
         self._imgrefs.append(pill)
         self.canvas.create_image(tx - M, ty - M, anchor="nw", image=pill,
                                  tags="toolbar")
@@ -1881,7 +2105,9 @@ class ScreenshotTool:
         for kind, name, rx in positions:
             self._make_button(kind, name, tx + rx, cy - btn // 2, btn)
 
-        self._build_subbar(tx, ty, width, height)
+        # 二级菜单（子栏）默认不出现，只有选中某个工具时才显示
+        if self.tool:
+            self._build_subbar(tx, ty, width, height)
         if self.tool:
             self._highlight_tool()
 
@@ -1899,16 +2125,39 @@ class ScreenshotTool:
                 self.set_tool(name)
             else:
                 {"undo": self.undo, "save": self.do_save,
-                 "close": self.cancel, "confirm": self.do_copy}[name]()
+                 "close": self.cancel,
+                 "confirm": lambda: self.do_copy(paste=True)}[name]()
+
+        def on_enter(_e):
+            show("active" if lbl._active else "hover")
+            self._show_tooltip(name, x + size, y + size)   # 图标右下角
+
+        def on_leave(_e):
+            show("active" if lbl._active else "normal")
+            self.canvas.delete("tooltip")
 
         lbl.bind("<Button-1>", on_click)
-        lbl.bind("<Enter>", lambda e: show("active" if lbl._active else "hover"))
-        lbl.bind("<Leave>", lambda e: show("active" if lbl._active else "normal"))
+        lbl.bind("<Enter>", on_enter)
+        lbl.bind("<Leave>", on_leave)
         lbl._show = show
         self.canvas.create_window(x, y, anchor="nw", window=lbl, tags="toolbar")
         self._tb_widgets.append(lbl)
         if kind == "tool":
             self.tool_buttons[name] = lbl
+
+    def _show_tooltip(self, name, corner_x, corner_y):
+        """一级菜单悬停提示：深灰色文字 + 透明背景，出现在图标右下角。"""
+        self.canvas.delete("tooltip")
+        label = TOOL_NAMES.get(name, name)
+        fsz = -12 * UI
+        f = tkfont.Font(family=CN_FONT_FAMILY, size=fsz)
+        tw = f.measure(label)
+        x0 = min(corner_x - 2 * UI, self.vw - tw - 6)
+        y0 = min(corner_y, self.vh - (-fsz) - 6)
+        self.canvas.create_text(x0, y0, anchor="nw", text=label,
+                                fill="#3A3F44", font=(CN_FONT_FAMILY, fsz),
+                                tags="tooltip")
+        self.canvas.tag_raise("tooltip")
 
     def _highlight_tool(self):
         for name, lbl in self.tool_buttons.items():
@@ -1921,24 +2170,29 @@ class ScreenshotTool:
         self.build_toolbar()
 
     def _build_subbar(self, tx, ty, width, height):
-        sh = 40
+        step = 28 * UI            # 每个圆点/色块的水平步距
+        half = step // 2
+        pad = 12 * UI
+        sep = 14 * UI
+        shp_step = 32 * UI
+        sh = 40 * UI
         sy = ty + height + 10
         if sy + sh > self.vh - 8:
             sy = ty - sh - 10
 
         n_level = len(LEVELS)
-        pad = 12
         mosaic = (self.tool == "mosaic")
+        is_text = (self.tool == "text")
+        font_w = 150 * UI if is_text else 0   # 文字工具额外的字体下拉宽度
         if mosaic:
-            # 档位(笔刷大小) + 分隔 + 形状(方框/圆形)
-            cw = pad + n_level * 28 + 14 + 2 * 32 + pad
+            cw = pad + n_level*step + sep + 2*shp_step + pad
         else:
             n_color = len(PRESET_COLORS)
-            cw = pad + n_level * 28 + 14 + (n_color + 1) * 28 + pad
+            cw = pad + n_level*step + sep + (n_color+1)*step + font_w + pad
         sx = min(max(tx, 8), self.vw - cw - 8)
 
-        seps = [pad + n_level * 28 + 7]
-        pill, M = render_pill(cw, sh, seps)
+        seps = [pad + n_level*step + sep//2]
+        pill, M = render_pill(cw, sh, seps, radius=14 * UI)
         self._imgrefs.append(pill)
         self.canvas.create_image(sx - M, sy - M, anchor="nw", image=pill,
                                  tags="toolbar")
@@ -1949,48 +2203,95 @@ class ScreenshotTool:
         for i in range(n_level):
             lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
             lbl.bind("<Button-1>", lambda e, k=i: self.set_level(k))
-            self.canvas.create_window(x + 13, cy, window=lbl, tags="toolbar")
+            self.canvas.create_window(x + half, cy, window=lbl, tags="toolbar")
             self.level_buttons.append(lbl)
             self._tb_widgets.append(lbl)
-            x += 28
-        x += 14
+            x += step
+        x += sep
 
         if mosaic:
-            # 形状切换：方框(rect) / 圆形(ellipse)
             self.shape_buttons = {}
             for shp, icon in [("rect", "rect"), ("circle", "ellipse")]:
                 lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
                 lbl.bind("<Button-1>", lambda e, s=shp: self.set_mosaic_shape(s))
-                self.canvas.create_window(x + 16, cy, window=lbl, tags="toolbar")
+                self.canvas.create_window(x + shp_step//2, cy, window=lbl,
+                                          tags="toolbar")
                 self.shape_buttons[shp] = (lbl, icon)
                 self._tb_widgets.append(lbl)
-                x += 32
+                x += shp_step
             self.set_mosaic_shape(self.mosaic_shape)
         else:
             self.color_swatches = {}
             for col in PRESET_COLORS:
                 lbl = tk.Label(self.canvas, bg=PILL_BG, bd=0, cursor="hand2")
                 lbl.bind("<Button-1>", lambda e, c=col: self.set_color(c))
-                self.canvas.create_window(x + 13, cy, window=lbl, tags="toolbar")
+                self.canvas.create_window(x + half, cy, window=lbl, tags="toolbar")
                 self.color_swatches[col] = lbl
                 self._tb_widgets.append(lbl)
-                x += 28
-            more = tk.Label(self.canvas, image=render_plus(), bg=PILL_BG, bd=0,
-                            cursor="hand2")
+                x += step
+            more = tk.Label(self.canvas, image=render_plus(24*UI), bg=PILL_BG,
+                            bd=0, cursor="hand2")
             more._ref = more.cget("image")
             more.bind("<Button-1>", lambda e: self.pick_color())
-            self.canvas.create_window(x + 13, cy, window=more, tags="toolbar")
+            self.canvas.create_window(x + half, cy, window=more, tags="toolbar")
             self._tb_widgets.append(more)
+            x += step
             self.set_color(self.color)
+            if is_text:
+                x += 6 * UI
+                self._build_font_dropdown(x, cy)
 
         self.set_level(self.level)
+
+    def _build_font_dropdown(self, x, cy):
+        """文字工具的字体下拉：显示当前字体名，点击弹出内置字体列表选择。"""
+        mb = tk.Menubutton(self.canvas, text=" " + name_of(self.font_path) + " ▾",
+                           bg=PILL_BG, fg="#41464B", bd=0, relief="flat",
+                           font=(CN_FONT_FAMILY, -14*UI), cursor="hand2",
+                           activebackground="#EEF0F2", anchor="w",
+                           justify="left", direction="below")
+        menu = tk.Menu(mb, tearoff=0, font=(CN_FONT_FAMILY, -12*UI))
+        for name, path, fam in FONTS:
+            menu.add_command(label=name, columnbreak=0, hidemargin=1,
+                             font=(fam, -16*UI), compound="left",
+                             command=lambda p=path: self.set_font(p))
+        mb.configure(menu=menu)
+        self.font_menubtn = mb
+        self.canvas.create_window(x, cy, anchor="w", window=mb, tags="toolbar")
+        self._tb_widgets.append(mb)
+
+    def set_font(self, path):
+        self.font_path = path
+        if hasattr(self, "font_menubtn"):
+            try:
+                self.font_menubtn.configure(text="  " + name_of(path) + " ▾")
+            except Exception:
+                pass
+        # 若选中的是文字要素 → 直接换字体
+        si = self.selected_idx
+        if si is not None and 0 <= si < len(self.annotations) \
+                and self.annotations[si].get("type") == "text":
+            self.annotations[si]["font"] = path
+            self.redraw_static()
+            self._draw_move_box(si)
+            self._draw_edit_handle(si)
+        # 若正在输入 → 实时切换输入框字体
+        if self.text_entry:
+            txt = self.text_entry[0]
+            fs = self.text_entry[5]
+            try:
+                txt.configure(font=(family_of(path), -fs))
+            except Exception:
+                pass
+            self.text_entry = self.text_entry[:6] + (path,)
+            self._update_text_dashbox()
 
     def set_mosaic_shape(self, shape):
         self.mosaic_shape = shape
         if not hasattr(self, "shape_buttons"):
             return
         for shp, (lbl, icon) in self.shape_buttons.items():
-            img = render_icon(icon, 28, "active" if shp == shape else "normal")
+            img = render_icon(icon, 28*UI, "active" if shp == shape else "normal")
             lbl._ref = img
             lbl.configure(image=img)
 
@@ -1998,7 +2299,7 @@ class ScreenshotTool:
         self.level = k
         self.width, self.font_size = LEVELS[k]
         for i, lbl in enumerate(self.level_buttons):
-            img = render_level(i, i == k)
+            img = render_level(i, i == k, 28*UI)
             lbl._ref = img
             lbl.configure(image=img)
 
@@ -2016,7 +2317,7 @@ class ScreenshotTool:
         if not hasattr(self, "color_swatches"):
             return
         for c, lbl in self.color_swatches.items():
-            img = render_swatch(c, c == col)
+            img = render_swatch(c, c == col, 24*UI)
             lbl._ref = img
             lbl.configure(image=img)
 
@@ -2027,7 +2328,9 @@ class ScreenshotTool:
 
     # ---------------- 动作 ----------------
     def _set_clipboard_text(self, text):
-        try:
+        if text_to_clipboard(text):
+            return True
+        try:                                    # 兜底：tk 剪贴板
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.root.update()
@@ -2035,7 +2338,12 @@ class ScreenshotTool:
         except Exception:
             return False
 
-    def do_copy(self):
+    def _finish_and_paste(self):
+        """结束工具并在焦点处自动粘贴剪贴板内容（Ctrl+V）。"""
+        self.finish()
+        self.root.after(200, send_ctrl_v)
+
+    def do_copy(self, paste=False):
         # 选区阶段：Ctrl+C 复制当前放大镜取到的色号
         if self.mode == "select":
             if self.pick_hex and self._set_clipboard_text(self.pick_hex):
@@ -2045,9 +2353,13 @@ class ScreenshotTool:
             return
         img = self._final()
         ok = image_to_clipboard(img)
-        self.finish()
-        if ok:
-            self.flash_toast("已复制到剪贴板 ✓")
+        if paste and ok:
+            self._finish_and_paste()
+            self.flash_toast("已复制并粘贴到光标处 ✓")
+        else:
+            self.finish()
+            if ok:
+                self.flash_toast("已复制到剪贴板 ✓")
 
     def do_save(self):
         if self.mode != "edit":
@@ -2123,12 +2435,34 @@ class ScreenshotTool:
         self.root.mainloop()
 
 
+def read_config_hotkey():
+    """从可执行文件旁的 config.ini 读取自定义快捷键（免安装版用户可自行编辑）。
+    支持形如：hotkey=ctrl+alt+a （行首 # 为注释）。"""
+    path = _os.path.join(_exe_dir(), "config.ini")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or line.startswith("["):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip().lower() == "hotkey" and v.strip():
+                        return v.strip()
+    except Exception:
+        pass
+    return None
+
+
 def main():
     resident, hotkey = True, "ctrl+alt+`"
+    cfg = read_config_hotkey()            # 免安装版：config.ini 自定义快捷键
+    if cfg:
+        hotkey = cfg
     args = sys.argv[1:]
     if "--shot" in args:
         resident = False
-    if "--hotkey" in args:
+    if "--hotkey" in args:                # 命令行优先级最高
         i = args.index("--hotkey")
         if i + 1 < len(args):
             hotkey = args[i + 1]
