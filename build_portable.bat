@@ -8,10 +8,14 @@ where pyinstaller >nul 2>nul || (
   pip install pyinstaller || goto :err
 )
 
+rem 排除 numpy/MKL 等重型依赖（代码会自动降级），体积从 ~500MB 降到 ~60MB
 pyinstaller --noconfirm --windowed --clean --name SnapMark ^
   --add-data "fonts\SourceHanSerifCN-Regular.ttf;fonts" ^
   --add-data "fonts\ZhanKuKuaiLeTi.ttf;fonts" ^
   --add-data "icon;icon" ^
+  --exclude-module numpy --exclude-module scipy --exclude-module matplotlib ^
+  --exclude-module pandas --exclude-module numexpr --exclude-module mkl ^
+  --exclude-module PyQt5 --exclude-module PySide2 --exclude-module IPython ^
   screenshot_tool.py || goto :err
 
 copy /Y config.ini "dist\SnapMark\config.ini" >nul
