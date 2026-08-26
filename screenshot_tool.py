@@ -19,6 +19,7 @@ Snipaste 风格界面：绿色可缩放选区 + 顶部圆角药丸工具栏
 """
 
 import sys
+import time
 import io
 import math
 import socket
@@ -79,6 +80,21 @@ def register_text_font():
             ctypes.windll.gdi32.AddFontResourceExW(ctypes.c_wchar_p(p), 0x10, 0)
         except Exception as ex:
             print("字体注册失败（将回退系统字体）：", ex)
+
+
+_UI_FONT_CACHE = {}
+
+
+def ui_font(px):
+    """缓存 UI 字体（放大镜/尺寸标签等），避免每帧从磁盘重复加载。"""
+    f = _UI_FONT_CACHE.get(px)
+    if f is None:
+        try:
+            f = ImageFont.truetype(CN_FONT_PATH, px)
+        except Exception:
+            f = ImageFont.load_default()
+        _UI_FONT_CACHE[px] = f
+    return f
 
 
 def get_font(path, size):
@@ -803,6 +819,12 @@ class ScreenshotTool:
         self._rotate_img = None
         self.mosaic_shape = "rect"
         self.font_path = DEFAULT_FONT
+        self._last_sel_hover = 0.0
+        self._pending_hover = None
+        self._hover_scheduled = False
+        self._mag_photo = None
+        self._mag_item = None
+        self._crop_photo = None
         self.text_entry = None
         self.tool = None
         self.annotations = []
@@ -825,6 +847,7 @@ class ScreenshotTool:
             tgt("<Control-z>", lambda e: self.undo())
             tgt("<Control-c>", lambda e: self.do_copy())
             tgt("<Control-s>", lambda e: self.do_save())
+            tgt("<Delete>", lambda e: self.delete_selected())
         self.overlay.focus_force()
         self.canvas.focus_set()
         self.root.after(60, self._poll_keys)      # Esc 轮询兜底
@@ -1220,35 +1243,61 @@ class ScreenshotTool:
         pd = ImageDraw.Draw(full)
         pd.rectangle([pdx, D + pdx, pdx + 18*UI, D + pdx + 18*UI], fill=rgb,
                      outline=(160, 160, 160))
-        try:
-            f1 = ImageFont.truetype(CN_FONT_PATH, 14 * UI)
-            f2 = ImageFont.truetype(CN_FONT_PATH, 12 * UI)
-        except Exception:
-            f1 = f2 = ImageFont.load_default()
+        f1 = ui_font(14 * UI)
+        f2 = ui_font(12 * UI)
         tx0 = pdx + 22 * UI
         pd.text((tx0, D + 6*UI), hexs, fill=(20, 20, 20), font=f1)
         pd.text((tx0, D + 6*UI + lh), "RGB %d, %d, %d" % rgb, fill=(20, 20, 20),
                 font=f1)
         pd.text((tx0, D + 6*UI + 2*lh), "右键复制色值", fill=(140, 140, 140),
                 font=f2)
-        self._mag_photo = ImageTk.PhotoImage(full)
+        # 复用同一个 Tk 图像对象（paste 覆盖像素），避免每帧重新分配（关键提速）
+        mp = getattr(self, "_mag_photo", None)
+        if mp is not None and mp.width() == full.width \
+                and mp.height() == full.height:
+            mp.paste(full)
+        else:
+            self._mag_photo = ImageTk.PhotoImage(full)
         ox, oy = x + 20, y + 20
         if ox + D > self.vw:
             ox = x - 20 - D
         if oy + D + panelH > self.vh:
             oy = y - 20 - (D + panelH)
-        self.canvas.create_image(ox, oy, anchor="nw", image=self._mag_photo,
-                                 tags="mag")
+        item = getattr(self, "_mag_item", None)
+        if item and item in self.canvas.find_withtag("mag"):
+            self.canvas.coords(item, ox, oy)
+            self.canvas.itemconfigure(item, image=self._mag_photo)
+        else:
+            self._mag_item = self.canvas.create_image(
+                ox, oy, anchor="nw", image=self._mag_photo, tags="mag")
         self.canvas.tag_raise("mag")
 
     # ---------------- 悬停 ----------------
+    def _do_sel_hover(self, x, y):
+        try:
+            self._update_snap(x, y)
+        except Exception:
+            pass
+        self._update_magnifier(x, y)           # 取色放大镜始终显示
+
+    def _flush_hover(self):
+        self._hover_scheduled = False
+        if self.mode == "select" and not self.start_pt and self._pending_hover:
+            self._last_sel_hover = time.perf_counter()
+            self._do_sel_hover(*self._pending_hover)
+
     def on_hover(self, e):
         if self.mode == "select" and not self.start_pt:
-            try:
-                self._update_snap(e.x, e.y)
-            except Exception:
-                pass
-            self._update_magnifier(e.x, e.y)   # 取色放大镜始终显示
+            # 节流到约 30fps：避免每个原始 Motion 事件都重建放大镜/枚举窗口
+            now = time.perf_counter()
+            self._pending_hover = (e.x, e.y)
+            if now - getattr(self, "_last_sel_hover", 0.0) < 0.03:
+                if not getattr(self, "_hover_scheduled", False):
+                    self._hover_scheduled = True
+                    self.root.after(25, self._flush_hover)
+                return
+            self._last_sel_hover = now
+            self._do_sel_hover(e.x, e.y)
             return
         if self.mode != "edit" or self.drag_mode:
             return
@@ -1392,11 +1441,7 @@ class ScreenshotTool:
         bg = self._flatten(ss=2, exclude=idx)
         self._show_crop(bg)
         self._draw_chrome()
-        a = self.annotations[idx]
-        if a["type"] in ("rect", "rrect", "ellipse", "arrow"):
-            self._show_shape_overlay(a, "movetemp")
-        else:
-            self._draw_one_vector(a, "movetemp")
+        self._draw_one_vector(self.annotations[idx], "movetemp")
         self._draw_move_box(idx)
 
     def _start_bend_arrow(self, idx, e):
@@ -1406,7 +1451,7 @@ class ScreenshotTool:
         bg = self._flatten(ss=2, exclude=idx)
         self._show_crop(bg)
         self._draw_chrome()
-        self._show_shape_overlay(self.annotations[idx], "movetemp")
+        self._draw_one_vector(self.annotations[idx], "movetemp")
         self._draw_move_box(idx)
 
     def _bend_arrow_to(self, idx, mx, my):
@@ -1443,8 +1488,9 @@ class ScreenshotTool:
         p0, p1, pc = self._rot_base
         r0, r1, rc = rot(p0), rot(p1), rot(pc)
         a = self.annotations[self.move_idx]
-        a["coords"] = (r0[0], r0[1], r1[0], r1[1])
-        a["ctrl"] = rc
+        # 端点与控制点夹在选区框内，旋转不越界
+        a["coords"] = self._clamp(*r0) + self._clamp(*r1)
+        a["ctrl"] = self._clamp(*rc)
 
     def edit_drag(self, e):
         shift = bool(e.state & 0x0001)
@@ -1457,23 +1503,20 @@ class ScreenshotTool:
             self._move_anno(self.move_idx, dx, dy)
             self.start_pt = (e.x, e.y)
             self.canvas.delete("movetemp")
-            a = self.annotations[self.move_idx]
-            if a["type"] in ("rect", "rrect", "ellipse", "arrow"):
-                self._show_shape_overlay(a, "movetemp")   # 抗锯齿平滑预览
-            else:
-                self._draw_one_vector(a, "movetemp")
+            # 拖动过程用轻量矢量预览（松手后 redraw_static 用 Pillow 精修）
+            self._draw_one_vector(self.annotations[self.move_idx], "movetemp")
             self._draw_move_box(self.move_idx)
             self._draw_edit_handle(self.move_idx)
         elif self.drag_mode == "bendarrow":
             mx, my = self._clamp(e.x, e.y)
             self._bend_arrow_to(self.move_idx, mx, my)
             self.canvas.delete("movetemp")
-            self._show_shape_overlay(self.annotations[self.move_idx], "movetemp")
+            self._draw_one_vector(self.annotations[self.move_idx], "movetemp")
             self._draw_move_box(self.move_idx)
         elif self.drag_mode == "rotatearrow":
             self._rotate_arrow_to(e)
             self.canvas.delete("movetemp")
-            self._show_shape_overlay(self.annotations[self.move_idx], "movetemp")
+            self._draw_one_vector(self.annotations[self.move_idx], "movetemp")
             self._draw_move_box(self.move_idx)
         elif self.drag_mode == "draw":
             self._do_draw(e.x, e.y, shift)
@@ -1526,6 +1569,11 @@ class ScreenshotTool:
 
     def _move_anno(self, idx, dx, dy):
         a = self.annotations[idx]
+        # 限制平移量，使整个要素始终留在选区框内
+        bx0, by0, bx1, by1 = self._anno_bbox(a)
+        l, t, r, b = self.sel
+        dx = max(l - bx0, min(dx, r - bx1))
+        dy = max(t - by0, min(dy, b - by1))
         if a["type"] == "mosaic":
             a["stamps"] = [(sx + dx, sy + dy) for sx, sy in a["stamps"]]
         elif a["type"] == "pen":
@@ -1549,6 +1597,32 @@ class ScreenshotTool:
     def _draw_comet(self, coords, w, color, tag):
         for quad, col in comet_polys(*coords, w, color):
             self.canvas.create_polygon(quad, fill=col, outline=col, tags=tag)
+
+    def _draw_arrow_vector(self, a, tag):
+        """弯折箭头的轻量矢量预览：贝塞尔平滑折线 + 三角箭头（拖动时用，
+        松手后由 redraw_static 精修成彗星渐变）。"""
+        x0, y0, x1, y1 = a["coords"]
+        cx, cy = a.get("ctrl") or ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        w, color = a["width"], a["color"]
+        N = 18
+        pts = []
+        for i in range(N + 1):
+            t = i / N
+            mt = 1 - t
+            pts.append(mt * mt * x0 + 2 * mt * t * cx + t * t * x1)
+            pts.append(mt * mt * y0 + 2 * mt * t * cy + t * t * y1)
+        self.canvas.create_line(*pts, fill=color, width=w, smooth=True,
+                                capstyle=tk.ROUND, joinstyle=tk.ROUND, tags=tag)
+        ex, ey, px, py = pts[-2], pts[-1], pts[-4], pts[-3]
+        dx, dy = ex - px, ey - py
+        L = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / L, dy / L
+        pxp, pyp = -uy, ux
+        hl, hw = 10 + 3 * w, 5 + 1.9 * w
+        bx, by = ex - ux * hl, ey - uy * hl
+        self.canvas.create_polygon(bx + pxp * hw, by + pyp * hw, ex, ey,
+                                   bx - pxp * hw, by - pyp * hw,
+                                   fill=color, outline=color, tags=tag)
 
     def _shape_photo(self, a):
         """把 rect/rrect/ellipse/arrow 渲染成抗锯齿小图（与最终合成完全一致），
@@ -1707,15 +1781,17 @@ class ScreenshotTool:
             self.temp_item = None
         self.canvas.delete("drawtemp")
         w = self.width
-        if self.tool in ("rect", "rrect", "ellipse"):
-            # 所见即最终所得：用与导出一致的抗锯齿小图预览
-            self._show_shape_overlay(
-                {"type": self.tool, "coords": (x0, y0, x, y),
-                 "color": self.color, "width": w}, "drawtemp")
+        # 拖动绘制用轻量 tkinter 矢量预览（松手 redraw_static 用 Pillow 精修成最终效果）
+        if self.tool == "rect":
+            self.temp_item = self.canvas.create_rectangle(
+                x0, y0, x, y, outline=self.color, width=w)
+        elif self.tool == "rrect":
+            self._canvas_rrect(x0, y0, x, y, self.color, w, "drawtemp")
+        elif self.tool == "ellipse":
+            self.temp_item = self.canvas.create_oval(
+                x0, y0, x, y, outline=self.color, width=w)
         elif self.tool == "arrow":
-            self._show_shape_overlay(
-                {"type": "arrow", "coords": (x0, y0, x, y),
-                 "color": self.color, "width": w}, "drawtemp")
+            self._draw_comet((x0, y0, x, y), w, self.color, "drawtemp")
         elif self.tool == "mosaic":
             self._paint_mosaic_stamp(x, y)
         elif self.tool == "pen":
@@ -1954,7 +2030,12 @@ class ScreenshotTool:
     # ---------------- 显示 ----------------
     def _show_crop(self, pil_img):
         l, t, r, b = self.sel
-        self._crop_photo = ImageTk.PhotoImage(pil_img)
+        cp = getattr(self, "_crop_photo", None)
+        if cp is not None and cp.width() == pil_img.width \
+                and cp.height() == pil_img.height:
+            cp.paste(pil_img)            # 复用同尺寸 Tk 图像，避免反复分配
+        else:
+            self._crop_photo = ImageTk.PhotoImage(pil_img)
         self.canvas.delete("crop")
         self.canvas.delete("anno")
         self.canvas.create_image(l, t, anchor="nw", image=self._crop_photo,
@@ -2005,7 +2086,10 @@ class ScreenshotTool:
             self.canvas.create_oval(*a["coords"], outline=a["color"],
                                     width=a["width"], tags=tag)
         elif t == "arrow":
-            self._draw_comet(a["coords"], a["width"], a["color"], tag)
+            if a.get("ctrl"):                       # 弯折箭头：矢量曲线预览
+                self._draw_arrow_vector(a, tag)
+            else:
+                self._draw_comet(a["coords"], a["width"], a["color"], tag)
         elif t == "pen":
             self.canvas.create_line(*a["points"], fill=a["color"],
                                     width=a["width"], capstyle=tk.ROUND,
@@ -2038,6 +2122,19 @@ class ScreenshotTool:
                                 tags=tag)
         self.canvas.create_text(l, ly, anchor="nw", text=text, fill="#FFFFFF",
                                 font=(CN_FONT_FAMILY, -13 * UI), tags=tag)
+
+    def delete_selected(self):
+        """Delete 键：删除当前选中的要素。"""
+        if self.mode != "edit" or self.text_entry:
+            return
+        si = self.selected_idx
+        if si is not None and 0 <= si < len(self.annotations):
+            del self.annotations[si]
+            self.selected_idx = None
+            self.hover_anno_idx = None
+            self.canvas.delete("editbtn")
+            self.canvas.delete("movebox")
+            self.redraw_static()
 
     def undo(self):
         if self.text_entry:
