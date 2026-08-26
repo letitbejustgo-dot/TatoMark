@@ -677,10 +677,43 @@ static void AnnoBBox(const Anno&a,float&l,float&t,float&r,float&b){
     if(a.type==5){ float w,h; TextSize(a,w,h); l=a.x0;t=a.y0;r=a.x0+w;b=a.y0+h; return; }
     l=min(a.x0,a.x1);t=min(a.y0,a.y1);r=max(a.x0,a.x1);b=max(a.y0,a.y1);
 }
-static int AnnoAt(int x,int y){ for(int i=(int)g_annos.size()-1;i>=0;i--){ if(g_annos[i].type==4) continue; float l,t,r,b; AnnoBBox(g_annos[i],l,t,r,b); if(x>=l-5&&x<=r+5&&y>=t-5&&y<=b+5) return i; } return -1; }
+static float DistSeg(float px,float py,float ax,float ay,float bx,float by){
+    float dx=bx-ax,dy=by-ay; float L2=dx*dx+dy*dy;
+    float t = L2>0 ? ((px-ax)*dx+(py-ay)*dy)/L2 : 0.0f; t=max(0.0f,min(1.0f,t));
+    float qx=ax+t*dx, qy=ay+t*dy; return sqrtf((px-qx)*(px-qx)+(py-qy)*(py-qy));
+}
+// 只有落在“图形边线”上才算命中（框内不命中，方便在框里继续放要素）
+static bool OnAnno(const Anno&a,float x,float y){
+    float tol=6.0f*UI;
+    if(a.type==5){ float l,t,r,b; AnnoBBox(a,l,t,r,b); return x>=l-tol&&x<=r+tol&&y>=t-tol&&y<=b+tol; } // 文本：整块
+    if(a.type==3){ // 箭头：贴近箭身（含弯折贝塞尔）
+        float w=max(tol,a.width*0.5f+4.0f*UI);
+        if(a.hasCtrl){ float best=1e9f,pxA=a.x0,pyA=a.y0; const int N=24;
+            for(int i=1;i<=N;i++){ float t=(float)i/N,mt=1-t;
+                float bx=mt*mt*a.x0+2*mt*t*a.cx+t*t*a.x1, by=mt*mt*a.y0+2*mt*t*a.cy+t*t*a.y1;
+                best=min(best,DistSeg(x,y,pxA,pyA,bx,by)); pxA=bx;pyA=by; }
+            return best<=w; }
+        return DistSeg(x,y,a.x0,a.y0,a.x1,a.y1)<=w;
+    }
+    float l=min(a.x0,a.x1),t=min(a.y0,a.y1),r=max(a.x0,a.x1),b=max(a.y0,a.y1);
+    float hw=max(tol,a.width*0.5f+2.0f*UI);
+    if(a.type==2){ // 椭圆：径向距离贴近椭圆线
+        float cx=(l+r)/2,cy=(t+b)/2,rx=(r-l)/2,ry=(b-t)/2; if(rx<1)rx=1; if(ry<1)ry=1;
+        float f=sqrtf(((x-cx)/rx)*((x-cx)/rx)+((y-cy)/ry)*((y-cy)/ry));
+        return fabsf(f-1.0f)*min(rx,ry)<=hw;
+    }
+    // 矩形 / 圆角矩形：只在四条边附近
+    bool inX=(x>=l-hw&&x<=r+hw), inY=(y>=t-hw&&y<=b+hw);
+    bool nearV=(fabsf(x-l)<=hw||fabsf(x-r)<=hw)&&inY;
+    bool nearH=(fabsf(y-t)<=hw||fabsf(y-b)<=hw)&&inX;
+    return nearV||nearH;
+}
+static int AnnoAt(int x,int y){ for(int i=(int)g_annos.size()-1;i>=0;i--){ if(g_annos[i].type==4) continue; if(OnAnno(g_annos[i],(float)x,(float)y)) return i; } return -1; }
 static void MoveAnno(int i,float dx,float dy){ Anno&a=g_annos[i]; if(a.type==4){ for(auto&s:a.stamps){s.x+=dx;s.y+=dy;} } else { a.x0+=dx;a.y0+=dy;a.x1+=dx;a.y1+=dy; if(a.hasCtrl){a.cx+=dx;a.cy+=dy;} } }
 // 角点：0 TL 1 TR 2 BR 3 BL
 static int CornerAt(int idx,int x,int y){ if(g_annos[idx].type==4) return -1; float l,t,r,b; AnnoBBox(g_annos[idx],l,t,r,b); float cs=(9*UI)*(9*UI); float cx[4]={l,r,r,l},cy[4]={t,t,b,b}; for(int i=0;i<4;i++){ float dx=x-cx[i],dy=y-cy[i]; if(dx*dx+dy*dy<=cs) return i; } return -1; }
+// 命中要素“边线”，或其四个角点（角点可能在边线之外，如椭圆）——用于悬停/抓取缩放
+static int AnnoOrCornerAt(int x,int y){ int a=AnnoAt(x,y); if(a>=0) return a; for(int i=(int)g_annos.size()-1;i>=0;i--){ if(g_annos[i].type==4) continue; if(CornerAt(i,x,y)>=0) return i; } return -1; }
 static void ResizeTo(float mx,float my){
     Anno& a=g_annos[g_selIdx];
     if(a.type==5){ // 文字：等比例缩放，锚点角固定
@@ -690,6 +723,11 @@ static void ResizeTo(float mx,float my){
         if(anc==0){ a.x0=g_rzAx; a.y0=g_rzAy; } else if(anc==1){ a.x0=g_rzAx-w; a.y0=g_rzAy; }
         else if(anc==2){ a.x0=g_rzAx-w; a.y0=g_rzAy-h; } else { a.x0=g_rzAx; a.y0=g_rzAy-h; }
         return;
+    }
+    // 按住 Shift：矩形/圆角矩形/椭圆约束为正方/正圆（锚点角固定，取较大边），所见即所得
+    if((GetKeyState(VK_SHIFT)&0x8000) && a.type<=2){
+        float dx=mx-g_rzAx, dy=my-g_rzAy; float s=max(fabsf(dx),fabsf(dy));
+        mx=g_rzAx+(dx<0?-s:s); my=g_rzAy+(dy<0?-s:s);
     }
     float nl=min(g_rzAx,mx),nt=min(g_rzAy,my),nr=max(g_rzAx,mx),nb=max(g_rzAy,my);
     if(nr-nl<4)nr=nl+4; if(nb-nt<4)nb=nt+4;
@@ -734,7 +772,7 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 if((GetKeyState(VK_SHIFT)&0x8000) && g_cur.type<=2){ float dx=g_cur.x1-g_cur.x0,dy=g_cur.y1-g_cur.y0,s=max(fabsf(dx),fabsf(dy)); g_cur.x1=g_cur.x0+(dx<0?-s:s); g_cur.y1=g_cur.y0+(dy<0?-s:s); ClampSel(g_cur.x1,g_cur.y1); }
             }
         }
-        else if(g_mode==EDIT){ g_hoverBtn=-1; for(size_t i=0;i<g_btns.size();++i) if(PtIn(g_btns[i].rc,g_cursor.x,g_cursor.y)){ g_hoverBtn=(int)i; break; } g_hoverIdx = (g_typing||g_hoverBtn>=0)? -1 : AnnoAt(g_cursor.x,g_cursor.y); }
+        else if(g_mode==EDIT){ g_hoverBtn=-1; for(size_t i=0;i<g_btns.size();++i) if(PtIn(g_btns[i].rc,g_cursor.x,g_cursor.y)){ g_hoverBtn=(int)i; break; } g_hoverIdx = (g_typing||g_hoverBtn>=0)? -1 : AnnoOrCornerAt(g_cursor.x,g_cursor.y); }
         else if(g_mode==SEL){ g_haveSnap=SnapAt(g_cursor.x,g_cursor.y,g_snap); }
         InvalidateRect(hwnd,nullptr,FALSE); return 0; }
     case WM_LBUTTONDOWN:{
@@ -747,9 +785,11 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
             else if(PtIn(g_barRc,x,y)||(g_subRc.right>g_subRc.left&&PtIn(g_subRc,x,y))){ HandleBarClick(hwnd,x,y); }
             else {
                 int hit=AnnoAt(x,y);
-                int cor=(hit>=0)?CornerAt(hit,x,y):-1;
-                if(cor>=0){ g_dragMode=3; g_selIdx=hit; g_selArrow=(g_annos[hit].type==3?hit:-1); g_rzCorner=cor; g_rzOrig=g_annos[hit];
-                    float l,t,r,b; AnnoBBox(g_annos[hit],l,t,r,b); float cxs[4]={l,r,r,l},cys[4]={t,t,b,b}; int anc=(cor+2)%4; g_rzAx=cxs[anc];g_rzAy=cys[anc];g_rzGx=cxs[cor];g_rzGy=cys[cor]; SetCapture(hwnd); }
+                // 角点缩放优先：对边线命中或当前悬停/选中的要素，即使角点在边线外（椭圆）也可抓
+                int ct=(hit>=0)?hit:((g_selIdx>=0)?g_selIdx:g_hoverIdx);
+                int cor=(ct>=0)?CornerAt(ct,x,y):-1;
+                if(cor>=0){ g_dragMode=3; g_selIdx=ct; g_selArrow=(g_annos[ct].type==3?ct:-1); g_rzCorner=cor; g_rzOrig=g_annos[ct];
+                    float l,t,r,b; AnnoBBox(g_annos[ct],l,t,r,b); float cxs[4]={l,r,r,l},cys[4]={t,t,b,b}; int anc=(cor+2)%4; g_rzAx=cxs[anc];g_rzAy=cys[anc];g_rzGx=cxs[cor];g_rzGy=cys[cor]; SetCapture(hwnd); }
                 else if(hit>=0){ g_selIdx=hit; g_selArrow=(g_annos[hit].type==3?hit:-1); g_moving=true; g_moveLast=g_cursor; SetCapture(hwnd); }
                 else if(g_tool==5 && PtIn(g_sel,x,y)){ PlaceTextEntry(hwnd,x,y); }
                 else if(g_tool>=0 && PtIn(g_sel,x,y)){
