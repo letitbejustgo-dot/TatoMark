@@ -1,30 +1,17 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-env/
+# C++ 构建产物
+*.exe
+*.o
+*.obj
 
-# Build / packaging
-build/
-dist/
-*.egg-info/
-*.spec
+# 打包产物（发到 Releases，不入库）
+*.zip
 
-# 临时测试产物
-_*.py
-*_test.png
-render_test.png
-final_test.png
-scene_preview.png
-toolbar_preview.png
+# 临时测试文件
+_*
+d2dtest.*
+wictest.*
 
 # 系统
 Thumbs.db
 desktop.ini
 .DS_Store
-
-# 便携版打包产物（发到 Releases，不入库）
-SnapMark-portable.zip
-*.zip
