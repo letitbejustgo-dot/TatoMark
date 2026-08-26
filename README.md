@@ -45,6 +45,45 @@
 
 > 文字功能依赖 exe 同目录的 `fonts/`（思源宋体 / 站酷快乐体），分发时请连 `fonts/`、`icon/` 一起。
 
+## 标注与编辑
+
+**彗星箭头** —— 在选区内拖拽即画，尾细头粗、带渐隐拖尾；画完后中点出现绿色控制点，拖它把箭头弯折成弧线 / 拐弯箭头。
+
+<p align="center">
+  <img src="assets/comet.png" alt="彗星箭头" width="620">
+</p>
+
+**缩放 / 旋转（合并到四角）** —— 选中任意要素后出现灰色虚线包围盒；拖四角即可任意缩放，靠近角点还能旋转；顶部圆点是旋转手柄。**文本要素等比缩放**，不变形。
+
+<p align="center">
+  <img src="assets/resize.png" alt="缩放与旋转" width="620">
+</p>
+
+## 自定义 / 更换开源字体
+
+文字工具的两种字体不是写死的，可自由替换成任意开源字体（下拉里固定两个槽位）。字体配置集中在 `main.cpp` 顶部三处数组 + 一处文件名，一一对应：
+
+| 位置 | 含义 | 默认值 |
+|---|---|---|
+| `g_fontFiles`（`RegisterFonts` 内） | ttf **文件名**（放在 `fonts/`） | `SourceHanSerifCN-Regular.ttf` / `ZhanKuKuaiLeTi.ttf` |
+| `FONT_FAM[2]` | 字体**内部族名**（DirectWrite 用它匹配，必须精确） | `Source Han Serif CN` / `HappyZcool-2016` |
+| `FONT_NAME[2]` | 下拉里显示的**中文名** | `思源宋体` / `站酷快乐体` |
+
+替换步骤：
+
+1. 把新的 `.ttf` 放进 `fonts/`。
+2. 改 `g_fontFiles` 里对应的文件名。
+3. 改 `FONT_FAM` 为该字体的**真实族名** —— 这一步最关键。查族名的方法：右键 ttf → 属性，或用
+   ```powershell
+   Add-Type -AssemblyName System.Drawing
+   (New-Object System.Drawing.Text.PrivateFontCollection).AddFontFile("fonts\你的字体.ttf")
+   ```
+   族名不对会回退成系统默认字体。
+4. 改 `FONT_NAME` 为你想在下拉里显示的名字。
+5. `build.bat` 重新编译。
+
+> 想加更多字体槽位，把这三个数组扩容并同步下拉逻辑即可。
+
 ## 编译
 
 需要现代 GCC（conda 自带的 mingw 5.3 太旧，会在 `d2d1.h` 触发编译器崩溃）。推荐便携版 **[w64devkit](https://github.com/skeeto/w64devkit)**：
