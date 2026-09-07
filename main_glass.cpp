@@ -129,6 +129,16 @@ static std::vector<BYTE> g_mosaicPixels;
 static ID2D1Bitmap*      g_mosaicBmp=nullptr;
 static ID2D1BitmapBrush* g_mosaicBrush=nullptr;
 
+// —— 液态玻璃：整屏模糊背板(1/4 分辨率) + 位图画刷 + 顶部高光渐变 ——
+static std::vector<BYTE>       g_blurPixels; static int g_bw=0,g_bh=0;
+static ID2D1Bitmap*            g_blurBmp=nullptr;
+static ID2D1BitmapBrush*       g_blurBrush=nullptr;
+static ID2D1LinearGradientBrush* g_sheen=nullptr;
+
+// —— 方案 A：工具高亮融流动画 ——
+static HWND  g_hwnd=nullptr;
+static float g_hlLead=0, g_hlLag=0; static bool g_hlOn=false;
+
 // PNG 图标（与 Python 版一致）：WIC 源(设备无关) + D2D 位图(设备相关)
 static std::map<std::string,IWICFormatConverter*> g_iconWic;
 static std::map<std::string,ID2D1Bitmap*>         g_iconBmp;
@@ -185,6 +195,31 @@ static void ComputeMosaic(){
     }
 }
 
+// 生成 1/4 分辨率的整屏模糊背板（液态玻璃背景）。降采样 + 多趟盒式模糊 ≈ 高斯。
+static void ComputeBlur(){
+    g_bw=(g_vw+3)/4; g_bh=(g_vh+3)/4;
+    std::vector<BYTE> small_((size_t)g_bw*g_bh*4);
+    // 4x4 均值降采样
+    for(int y=0;y<g_bh;y++){ for(int x=0;x<g_bw;x++){
+        int sx=x*4, sy=y*4; long sr=0,sg=0,sb=0,c=0;
+        for(int j=0;j<4;j++){ int yy=sy+j; if(yy>=g_vh)break; const BYTE* p=&g_pixels[(size_t)yy*g_stride+(size_t)sx*4];
+            for(int i=0;i<4;i++){ int xx=sx+i; if(xx>=g_vw)break; sb+=p[0];sg+=p[1];sr+=p[2]; p+=4; c++; } }
+        BYTE* d=&small_[((size_t)y*g_bw+x)*4]; if(c<1)c=1; d[0]=(BYTE)(sb/c);d[1]=(BYTE)(sg/c);d[2]=(BYTE)(sr/c);d[3]=255;
+    }}
+    // 可分离盒式模糊（水平+垂直），跑 3 趟
+    std::vector<BYTE> tmp(small_.size()); const int R=3;
+    auto boxH=[&](std::vector<BYTE>&src,std::vector<BYTE>&dst){
+        for(int y=0;y<g_bh;y++){ for(int x=0;x<g_bw;x++){ long sr=0,sg=0,sb=0,c=0;
+            for(int k=-R;k<=R;k++){ int xx=x+k; if(xx<0)xx=0; if(xx>=g_bw)xx=g_bw-1; const BYTE* p=&src[((size_t)y*g_bw+xx)*4]; sb+=p[0];sg+=p[1];sr+=p[2];c++; }
+            BYTE* d=&dst[((size_t)y*g_bw+x)*4]; d[0]=(BYTE)(sb/c);d[1]=(BYTE)(sg/c);d[2]=(BYTE)(sr/c);d[3]=255; } } };
+    auto boxV=[&](std::vector<BYTE>&src,std::vector<BYTE>&dst){
+        for(int y=0;y<g_bh;y++){ for(int x=0;x<g_bw;x++){ long sr=0,sg=0,sb=0,c=0;
+            for(int k=-R;k<=R;k++){ int yy=y+k; if(yy<0)yy=0; if(yy>=g_bh)yy=g_bh-1; const BYTE* p=&src[((size_t)yy*g_bw+x)*4]; sb+=p[0];sg+=p[1];sr+=p[2];c++; }
+            BYTE* d=&dst[((size_t)y*g_bw+x)*4]; d[0]=(BYTE)(sb/c);d[1]=(BYTE)(sg/c);d[2]=(BYTE)(sr/c);d[3]=255; } } };
+    for(int pass=0;pass<3;pass++){ boxH(small_,tmp); boxV(tmp,small_); }
+    g_blurPixels.swap(small_);
+}
+
 // ---------- 磁吸 ----------
 static RECT DwmRect(HWND h){ RECT rc; if(FAILED(DwmGetWindowAttribute(h,DWMWA_EXTENDED_FRAME_BOUNDS,&rc,sizeof(rc)))) GetWindowRect(h,&rc); return rc; }
 static BOOL CALLBACK EnumProc(HWND h,LPARAM){ if(!IsWindowVisible(h)||IsIconic(h)) return TRUE; RECT rc=DwmRect(h); if(rc.right-rc.left<80||rc.bottom-rc.top<60) return TRUE; g_windows.push_back({rc.left,rc.top,rc.right,rc.bottom}); return TRUE; }
@@ -217,8 +252,24 @@ static void CreateDeviceResources(HWND hwnd){
             D2D1::BrushProperties(), &g_mosaicBrush);
     }
     for(auto&kv:g_iconWic){ ID2D1Bitmap* bm=nullptr; if(SUCCEEDED(g_rt->CreateBitmapFromWicBitmap(kv.second,nullptr,&bm))&&bm) g_iconBmp[kv.first]=bm; }
+    // 液态玻璃背板：模糊位图 + 位图画刷(缩放回全屏) + 顶部高光渐变
+    if(!g_blurPixels.empty()){
+        g_rt->CreateBitmap(D2D1::SizeU(g_bw,g_bh), g_blurPixels.data(), g_bw*4, bp, &g_blurBmp);
+        if(g_blurBmp){
+            g_rt->CreateBitmapBrush(g_blurBmp,
+                D2D1::BitmapBrushProperties(D2D1_EXTEND_MODE_CLAMP,D2D1_EXTEND_MODE_CLAMP,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR),
+                D2D1::BrushProperties(), &g_blurBrush);
+            if(g_blurBrush) g_blurBrush->SetTransform(D2D1::Matrix3x2F::Scale((float)g_vw/g_bw,(float)g_vh/g_bh));
+        }
+    }
+    ID2D1GradientStopCollection* gsc=nullptr; D2D1_GRADIENT_STOP gs[2]={
+        {0.0f, D2D1::ColorF(1,1,1,0.55f)}, {1.0f, D2D1::ColorF(1,1,1,0.0f)} };
+    if(SUCCEEDED(g_rt->CreateGradientStopCollection(gs,2,&gsc))&&gsc){
+        g_rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(D2D1::Point2F(0,0),D2D1::Point2F(0,1)),gsc,&g_sheen);
+        gsc->Release();
+    }
 }
-static void DiscardDeviceResources(){ for(auto&kv:g_iconBmp) if(kv.second) kv.second->Release(); g_iconBmp.clear(); SafeRelease(&g_mosaicBrush); SafeRelease(&g_mosaicBmp); SafeRelease(&g_shot); SafeRelease(&g_rt); }
+static void DiscardDeviceResources(){ for(auto&kv:g_iconBmp) if(kv.second) kv.second->Release(); g_iconBmp.clear(); SafeRelease(&g_sheen); SafeRelease(&g_blurBrush); SafeRelease(&g_blurBmp); SafeRelease(&g_mosaicBrush); SafeRelease(&g_mosaicBmp); SafeRelease(&g_shot); SafeRelease(&g_rt); }
 
 // 二次贝塞尔取点
 static D2D1_POINT_2F Bez(float x0,float y0,float cx,float cy,float x1,float y1,float t){
@@ -417,13 +468,49 @@ static void LayoutToolbar(){
 }
 static bool PtIn(const RECT&r,int x,int y){ return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom; }
 
-// ---------- 绘制工具栏 ----------
+// ---------- 绘制工具栏（苹果液态玻璃）----------
 static void PaintPill(const RECT& r, ID2D1SolidColorBrush* br){
-    float rad=12*UI;
-    br->SetColor(Col(255,255,255));
-    D2D1_ROUNDED_RECT rr=D2D1::RoundedRect(D2D1::RectF(r.left,r.top,r.right,r.bottom),rad,rad);
-    g_rt->FillRoundedRectangle(rr,br);
-    br->SetColor(Col(228,230,234)); g_rt->DrawRoundedRectangle(rr,br,1.0f);
+    float rad=14*UI;
+    D2D1_RECT_F rf=D2D1::RectF(r.left,r.top,r.right,r.bottom);
+    // 0) 柔和投影：多层递减 alpha 的圆角矩形，让玻璃在纯白背景上也能“浮起来”
+    for(int i=5;i>=1;i--){ float e=i*2.4f; br->SetColor(D2D1::ColorF(0.05f,0.07f,0.10f,0.045f));
+        g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rf.left-e,rf.top-e+2.5f,rf.right+e,rf.bottom+e+3.5f),rad+e,rad+e),br); }
+    D2D1_ROUNDED_RECT rr=D2D1::RoundedRect(rf,rad,rad);
+    if(g_blurBrush){
+        // 1) 磨砂背板：把背后屏幕的模糊图裁进圆角
+        g_rt->FillRoundedRectangle(rr,g_blurBrush);
+        // 2) 轻微“压暗+去饱和”的中性色霜面（比纯白更能在白底上显出玻璃块，避免全白融背景）
+        br->SetColor(D2D1::ColorF(0.62f,0.66f,0.72f,0.30f)); g_rt->FillRoundedRectangle(rr,br);
+        br->SetColor(D2D1::ColorF(1,1,1,0.14f)); g_rt->FillRoundedRectangle(rr,br);
+    } else {
+        br->SetColor(Col(255,255,255)); g_rt->FillRoundedRectangle(rr,br);
+    }
+    // 3) 顶部高光渐变（镜面反光）
+    if(g_sheen){ g_sheen->SetStartPoint(D2D1::Point2F(rf.left,rf.top));
+        g_sheen->SetEndPoint(D2D1::Point2F(rf.left,rf.top+(rf.bottom-rf.top)*0.62f));
+        g_rt->FillRoundedRectangle(rr,g_sheen); }
+    // 4) 外深内亮双描边：白底也有清晰玻璃轮廓
+    br->SetColor(D2D1::ColorF(0.32f,0.36f,0.42f,0.45f)); g_rt->DrawRoundedRectangle(rr,br,1.1f);
+    br->SetColor(D2D1::ColorF(1,1,1,0.75f));
+    g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rf.left+1.4f,rf.top+1.4f,rf.right-1.4f,rf.bottom-1.4f),rad-1,rad-1),br,1.0f);
+}
+// 方案 A：工具高亮融流（随激活工具在按钮间像液体一样拉伸/移动）
+static void PaintFlowHighlight(ID2D1SolidColorBrush* br){
+    if(g_tool<0){ g_hlOn=false; return; }
+    int idx=-1; for(size_t i=0;i<g_btns.size();++i) if(g_btns[i].kind==0 && g_btns[i].id==g_tool){ idx=(int)i; break; }
+    if(idx<0){ g_hlOn=false; return; }
+    RECT r=g_btns[idx].rc; float inset=3.0f;
+    float tx=r.left+inset, hh=(r.bottom-r.top)-inset*2, w=(r.right-r.left)-inset*2, y=r.top+inset;
+    if(!g_hlOn){ g_hlLead=g_hlLag=tx; g_hlOn=true; }
+    g_hlLead += (tx-g_hlLead)*0.34f;
+    g_hlLag  += (tx-g_hlLag )*0.19f;
+    float x0=min(g_hlLead,g_hlLag), x1=max(g_hlLead,g_hlLag)+w;
+    float rad=hh/2;
+    D2D1_ROUNDED_RECT rr=D2D1::RoundedRect(D2D1::RectF(x0,y,x1,y+hh),rad,rad);
+    br->SetColor(Col(19,192,96,0.95f)); g_rt->FillRoundedRectangle(rr,br);
+    br->SetColor(D2D1::ColorF(1,1,1,0.28f)); // 顶部一点高光让绿块也有玻璃感
+    g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0,y,x1,y+hh*0.5f),rad,rad),br);
+    if((fabs(tx-g_hlLead)>0.4f||fabs(tx-g_hlLag)>0.4f) && g_hwnd) InvalidateRect(g_hwnd,nullptr,FALSE);
 }
 static void DrawIconBmp(const char* key, const RECT& rc, float ratio){
     auto it=g_iconBmp.find(key); if(it==g_iconBmp.end()||!it->second) return;
@@ -438,8 +525,7 @@ static void DrawIconBmp(const char* key, const RECT& rc, float ratio){
     g_rt->DrawBitmap(bm,D2D1::RectF(cx-w/2,cy-h/2,cx+w/2,cy+h/2),1.0f,D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,src);
 }
 static void PaintIcon(const Btn& b, ID2D1SolidColorBrush* br){
-    bool active=(b.kind==0 && b.id==g_tool);
-    if(active){ br->SetColor(Col(225,246,234)); g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(b.rc.left+3,b.rc.top+3,b.rc.right-3,b.rc.bottom-3),8,8),br); }
+    // 激活态高亮已由 PaintFlowHighlight 统一绘制（融流），这里只画图标
     const char* key=nullptr;
     if(b.kind==0){ static const char* ks[]={"rect","rrect","ellipse","arrow","mosaic","text"}; key=ks[b.id]; }
     else if(b.kind==1) key="undo"; else if(b.kind==4) key="save";
@@ -481,6 +567,7 @@ static void DrawMagnifier(int cx,int cy, ID2D1SolidColorBrush* br){
 
 // ---------- 渲染 ----------
 static void Render(HWND hwnd){
+    g_hwnd=hwnd;
     CreateDeviceResources(hwnd); if(!g_rt) return;
     g_rt->BeginDraw(); g_rt->SetTransform(D2D1::Matrix3x2F::Identity());
     D2D1_RECT_F full=D2D1::RectF(0,0,(float)g_vw,(float)g_vh);
@@ -577,8 +664,9 @@ static void Render(HWND hwnd){
                     if(g_mshape==1) g_rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F((float)mx,(float)my),rr,rr),br,1.0f); else g_rt->DrawRectangle(D2D1::RectF(mx-rr,my-rr,mx+rr,my+rr),br,1.0f);
                 }
             }
-            // 工具栏
+            // 工具栏（液态玻璃）
             PaintPill(g_barRc,br);
+            PaintFlowHighlight(br);           // 方案 A：融流高亮（在图标下）
             for(auto&b:g_btns) PaintIcon(b,br);
             if(g_tool>=0 && g_subRc.right>g_subRc.left){
                 PaintPill(g_subRc,br);
@@ -1023,6 +1111,7 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE,LPSTR,int){
     g_factory->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,D2D1_LINE_JOIN_ROUND),nullptr,0,&g_round);
     { float dashes[]={7.0f,4.0f}; g_factory->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_FLAT,D2D1_CAP_STYLE_FLAT,D2D1_CAP_STYLE_FLAT,D2D1_LINE_JOIN_MITER,10.0f,D2D1_DASH_STYLE_CUSTOM,0.0f),dashes,2,&g_dash); }
     ComputeMosaic();
+    ComputeBlur();
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(&g_dwrite));
     RegisterFonts();
     CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&g_wic));
