@@ -13,6 +13,7 @@
 #include <d2d1.h>
 #include <d2d1helper.h>
 #include <dwrite.h>
+#include <dwrite_3.h>
 #include <wincodec.h>
 #include <commdlg.h>
 #include <vector>
@@ -40,6 +41,7 @@ static IDWriteTextFormat*     g_tf      = nullptr;  // 面板
 static IDWriteTextFormat*     g_tfSmall = nullptr;  // 放大镜面板(小一号)
 static IDWriteTextFormat*     g_tfHint  = nullptr;  // 顶部提示
 static IDWriteTextFormat*     g_tfIcon  = nullptr;  // 动作图标字形
+static IDWriteTextFormat*     g_tfMenu  = nullptr;  // 字体名/下拉(小号,垂直居中)
 
 static int g_vx,g_vy,g_vw,g_vh;
 static std::vector<BYTE> g_pixels; static int g_stride=0;
@@ -81,15 +83,19 @@ static int   g_rotIdx=-1; static float g_rotBaseAngle=0;   // 通用旋转(文�
 static bool  g_snapOn=false; static float g_snapX=0,g_snapY=0; // 箭头端点吸附提示
 static int   g_arrowEnd=-1;   // 拖动中的箭头端点：0 尾 1 头
 static int   g_nextId=1;      // 要素 id 分配器
+static int   g_selRz=-1;      // 正在拖动的选区手柄 0..7(-1 无)
+static bool  g_selMv=false;   // 正在移动整个选区
+static bool  g_fontMenu=false;// 字体下拉是否展开
+static HCURSOR g_curCross=nullptr; // 自定义初始光标(取色十字)
 // 角点缩放 (dragMode 3)
 static int   g_rzCorner=-1; static float g_rzAx=0,g_rzAy=0,g_rzGx=0,g_rzGy=0; static Anno g_rzOrig;
 static ID2D1StrokeStyle* g_round=nullptr;
 static const float MBRUSH[3]={27,51,84};
 static const float TSIZE[3]={24,40,64};
 
-// 文字/字体
-static const wchar_t* FONT_FAM[2] = { L"Source Han Serif CN", L"HappyZcool-2016" };
-static const wchar_t* FONT_NAME[2]= { L"思源宋体", L"站酷快乐体" };
+// 文字/字体（动态：扫描 fonts/ 下所有 ttf/otf，可安装/卸载）
+static std::vector<std::wstring> g_fontFams;   // 每个文件的字体族名（渲染匹配用）
+static std::vector<std::wstring> g_fontNames;  // 下拉显示名
 static int  g_fontIdx=0;
 // 文字输入：直接用 D2D 绘制(无子窗口，避免闪烁；框随文字自适应)
 static bool  g_typing=false;
@@ -157,6 +163,8 @@ static RECT g_barRc={0,0,0,0}, g_subRc={0,0,0,0};
 struct Sw { RECT rc; int idx; };            // 颜色/粗细 子栏按钮
 static std::vector<Sw> g_colSw; static std::vector<Sw> g_lvlSw; static std::vector<Sw> g_shpSw;
 static RECT g_fontBtn={0,0,0,0};
+static RECT g_fontAddBtn={0,0,0,0};              // 文字：安装字体 ＋
+static RECT g_fontDelBtn={0,0,0,0};              // 文字：卸载当前字体 －
 static RECT g_sizeSlider={0,0,0,0};              // 文字：字号拖动条轨道
 static bool g_sliding=false;                      // 正在拖字号条
 static const float SMIN=12.0f, SMAX=96.0f;        // 字号范围
@@ -339,9 +347,10 @@ static FontCollLoader* g_fontLoader=nullptr;
 // ---- 文字/字体 ----
 static std::map<long long,IDWriteTextFormat*> g_tfCache;
 static IDWriteTextFormat* GetTextFmt(int fi,int sz){
+    if(fi<0||fi>=(int)g_fontFams.size()) return nullptr;
     long long key=(long long)fi*100000+sz; auto it=g_tfCache.find(key); if(it!=g_tfCache.end()) return it->second;
     IDWriteTextFormat* f=nullptr;
-    g_dwrite->CreateTextFormat(FONT_FAM[fi],g_fontColl,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,(float)sz,L"zh-cn",&f);
+    g_dwrite->CreateTextFormat(g_fontFams[fi].c_str(),g_fontColl,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,(float)sz,L"zh-cn",&f);
     if(f) g_tfCache[key]=f; return f;
 }
 static void TextSize(const Anno&a,float&w,float&h){
@@ -350,16 +359,88 @@ static void TextSize(const Anno&a,float&w,float&h){
     if(!lay){w=h=0;return;} DWRITE_TEXT_METRICS m; lay->GetMetrics(&m); w=m.width; h=m.height; lay->Release();
 }
 static std::wstring ExeDir(){ wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr,p,MAX_PATH); std::wstring s(p); size_t k=s.find_last_of(L"\\/"); return k==std::wstring::npos?L"":s.substr(0,k+1); }
-static void RegisterFonts(){
-    std::wstring d=ExeDir()+L"fonts\\";
-    g_fontFiles={ d+L"SourceHanSerifCN-Regular.ttf", d+L"ZhanKuKuaiLeTi.ttf" };
-    // 系统级注册（供 GDI/其他），并构建自定义字体集（供 DirectWrite 直接用文件）
-    for(auto&p:g_fontFiles) AddFontResourceExW(p.c_str(),0,0);
-    g_fontLoader=new FontCollLoader();
-    if(SUCCEEDED(g_dwrite->RegisterFontCollectionLoader(g_fontLoader))){
-        static const wchar_t* key=L"tatomark";
-        g_dwrite->CreateCustomFontCollection(g_fontLoader,key,(UINT32)((wcslen(key)+1)*sizeof(wchar_t)),&g_fontColl);
+static std::wstring FontsDir(){ return ExeDir()+L"fonts\\"; }
+static std::wstring FamilyOfFile(const std::wstring& path){
+    std::wstring fam; IDWriteFontFile* file=nullptr;
+    if(FAILED(g_dwrite->CreateFontFileReference(path.c_str(),nullptr,&file))||!file) return fam;
+    BOOL sup=FALSE; DWRITE_FONT_FILE_TYPE ft; DWRITE_FONT_FACE_TYPE fat; UINT32 num=0;
+    if(SUCCEEDED(file->Analyze(&sup,&ft,&fat,&num)) && sup && num>=1){
+        IDWriteFontFace* face=nullptr;
+        if(SUCCEEDED(g_dwrite->CreateFontFace(fat,1,&file,0,DWRITE_FONT_SIMULATIONS_NONE,&face)) && face){
+            IDWriteFontFace3* f3=nullptr;
+            if(SUCCEEDED(face->QueryInterface(__uuidof(IDWriteFontFace3),(void**)&f3)) && f3){
+                IDWriteLocalizedStrings* names=nullptr;
+                if(SUCCEEDED(f3->GetFamilyNames(&names)) && names){
+                    UINT32 idx=0; BOOL ex=FALSE; names->FindLocaleName(L"zh-cn",&idx,&ex); if(!ex){ names->FindLocaleName(L"en-us",&idx,&ex); if(!ex) idx=0; }
+                    UINT32 len=0; if(SUCCEEDED(names->GetStringLength(idx,&len))){ std::vector<wchar_t> buf(len+1,0); if(SUCCEEDED(names->GetString(idx,buf.data(),len+1))) fam=buf.data(); }
+                    names->Release();
+                }
+                f3->Release();
+            }
+            face->Release();
+        }
     }
+    file->Release(); return fam;
+}
+static std::wstring StemOf(const std::wstring& p){ std::wstring s=p; size_t k=s.find_last_of(L"\\/"); if(k!=std::wstring::npos) s=s.substr(k+1); size_t d=s.find_last_of(L'.'); if(d!=std::wstring::npos) s=s.substr(0,d); return s; }
+static std::wstring CleanName(const std::wstring& fam){
+    for(size_t i=0;i<fam.size();++i){ if(fam[i]>=L'0'&&fam[i]<=L'9'){ bool cjk=false; for(size_t j=0;j<i;j++) if((unsigned short)fam[j]>127){cjk=true;break;}
+        if(cjk){ std::wstring s=fam.substr(0,i); while(!s.empty()&&s.back()==L' ') s.pop_back(); if(!s.empty()) return s; } break; } }
+    return fam;
+}
+static void ScanFontFiles(){
+    g_fontFiles.clear(); std::wstring d=FontsDir();
+    const wchar_t* pats[]={L"*.ttf",L"*.otf",L"*.ttc"};
+    for(auto pat:pats){ WIN32_FIND_DATAW fd; HANDLE h=FindFirstFileW((d+pat).c_str(),&fd);
+        if(h!=INVALID_HANDLE_VALUE){ do{ if(!(fd.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)) g_fontFiles.push_back(d+fd.cFileName); }while(FindNextFileW(h,&fd)); FindClose(h); } }
+    std::sort(g_fontFiles.begin(),g_fontFiles.end());
+}
+static int g_collKey=0;
+static bool g_loaderReg=false;
+static void BuildFontCollection(){
+    for(auto&kv:g_tfCache) if(kv.second) kv.second->Release(); g_tfCache.clear();
+    SafeRelease(&g_fontColl);
+    g_fontFams.clear(); g_fontNames.clear();
+    for(auto&p:g_fontFiles){ AddFontResourceExW(p.c_str(),0,0);
+        std::wstring fam=FamilyOfFile(p); if(fam.empty()) fam=StemOf(p);
+        g_fontFams.push_back(fam); g_fontNames.push_back(CleanName(fam)); }
+    if(!g_fontLoader) g_fontLoader=new FontCollLoader();
+    if(!g_loaderReg){ if(SUCCEEDED(g_dwrite->RegisterFontCollectionLoader(g_fontLoader))) g_loaderReg=true; }
+    if(g_loaderReg && !g_fontFiles.empty()){ wchar_t key[32]; swprintf(key,32,L"tato%d",++g_collKey);
+        g_dwrite->CreateCustomFontCollection(g_fontLoader,key,(UINT32)((wcslen(key)+1)*sizeof(wchar_t)),&g_fontColl); }
+    if(g_fontIdx>=(int)g_fontFams.size()) g_fontIdx=g_fontFams.empty()?0:(int)g_fontFams.size()-1;
+    if(g_fontIdx<0) g_fontIdx=0;
+}
+static void RegisterFonts(){ ScanFontFiles(); BuildFontCollection(); }
+static void LayoutToolbar();
+static void InstallFont(HWND hwnd){
+    wchar_t path[MAX_PATH]=L""; OPENFILENAMEW ofn; ZeroMemory(&ofn,sizeof(ofn)); ofn.lStructSize=sizeof(ofn);
+    ofn.hwndOwner=hwnd; ofn.lpstrFilter=L"TTF 字体\0*.ttf\0所有字体\0*.ttf;*.otf;*.ttc\0所有文件\0*.*\0"; ofn.lpstrFile=path; ofn.nMaxFile=MAX_PATH; ofn.lpstrDefExt=L"ttf"; ofn.nFilterIndex=1; ofn.Flags=OFN_FILEMUSTEXIST|OFN_EXPLORER;
+    SetWindowPos(hwnd,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);
+    BOOL ok=GetOpenFileNameW(&ofn);
+    SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE); SetForegroundWindow(hwnd);
+    if(ok){ std::wstring src=path; std::wstring name=src.substr(src.find_last_of(L"\\/")+1); std::wstring dst=FontsDir()+name;
+        CreateDirectoryW(FontsDir().c_str(),nullptr);
+        if(CopyFileW(src.c_str(),dst.c_str(),FALSE)){ RegisterFonts();
+            for(size_t i=0;i<g_fontFiles.size();++i) if(_wcsicmp(g_fontFiles[i].c_str(),dst.c_str())==0){ g_fontIdx=(int)i; break; }
+            if(g_selIdx>=0&&g_selIdx<(int)g_annos.size()&&g_annos[g_selIdx].type==5) g_annos[g_selIdx].fontIdx=g_fontIdx;
+        } else MessageBoxW(hwnd,L"复制字体失败",L"TatoMark",MB_OK|MB_ICONERROR); }
+    LayoutToolbar();
+}
+static void UninstallFont(HWND hwnd){
+    if(g_fontIdx<0||g_fontIdx>=(int)g_fontFiles.size()) return;
+    std::wstring path=g_fontFiles[g_fontIdx];
+    std::wstring msg=L"确定卸载字体：\n"+g_fontNames[g_fontIdx]+L"\n将从 fonts 文件夹删除该文件。";
+    SetWindowPos(hwnd,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);
+    int r=MessageBoxW(hwnd,msg.c_str(),L"TatoMark",MB_OKCANCEL|MB_ICONWARNING);
+    SetWindowPos(hwnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE); SetForegroundWindow(hwnd);
+    if(r!=IDOK) return;
+    for(auto&kv:g_tfCache) if(kv.second) kv.second->Release(); g_tfCache.clear(); SafeRelease(&g_fontColl);
+    RemoveFontResourceExW(path.c_str(),0,0);
+    if(!DeleteFileW(path.c_str())) MessageBoxW(hwnd,L"删除文件失败(可能被占用)，可稍后手动删除",L"TatoMark",MB_OK|MB_ICONWARNING);
+    RegisterFonts();
+    if(g_selIdx>=0&&g_selIdx<(int)g_annos.size()&&g_annos[g_selIdx].type==5 && g_fontIdx<(int)g_fontFams.size()) g_annos[g_selIdx].fontIdx=g_fontIdx;
+    LayoutToolbar();
 }
 static IWICFormatConverter* LoadIconWic(const std::wstring& path){
     IWICBitmapDecoder* dec=nullptr;
@@ -446,7 +527,7 @@ static void LayoutToolbar(){
     // 子栏（选中工具时）：粗细 + 颜色；马赛克则粗细 + 形状(方/圆)
     if(g_tool>=0){
         bool mo=(g_tool==4), tx5=(g_tool==5);
-        float sh=40*UI, step=28*UI, sp=12*UI, fw=tx5?150*UI:0, slW=120*UI;
+        float sh=40*UI, step=28*UI, sp=12*UI, fw=tx5?128*UI:0, slW=120*UI;
         float cw = mo ? (sp+3*step+14*UI+2*step+sp)
                  : tx5 ? (sp+slW+14*UI+6*step+fw+sp)
                        : (sp+3*step+14*UI+6*step+sp);
@@ -454,7 +535,7 @@ static void LayoutToolbar(){
         float sy=ty+h+10;
         if(sy+sh>g_vh-8) sy=ty-sh-10;
         g_subRc={(LONG)sx,(LONG)sy,(LONG)(sx+cw),(LONG)(sy+sh)};
-        float x=sx+sp, cy=sy+sh/2; g_fontBtn={0,0,0,0}; g_sizeSlider={0,0,0,0};
+        float x=sx+sp, cy=sy+sh/2; g_fontBtn={0,0,0,0}; g_fontAddBtn={0,0,0,0}; g_fontDelBtn={0,0,0,0}; g_sizeSlider={0,0,0,0};
         if(tx5){ // 文字：字号拖动条（替代三档圆点）
             g_sizeSlider={(LONG)x,(LONG)(cy-step/2),(LONG)(x+slW),(LONG)(cy+step/2)}; x+=slW;
         } else {
@@ -467,6 +548,24 @@ static void LayoutToolbar(){
     } else g_subRc={0,0,0,0};
 }
 static bool PtIn(const RECT&r,int x,int y){ return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom; }
+// 选区 8 手柄命中(0TL 1TM 2TR 3RM 4BR 5BM 6BL 7LM)
+static int SelHandleAt(int x,int y){ RECT s=g_sel; float mx=(s.left+s.right)/2.0f,my=(s.top+s.bottom)/2.0f;
+    float px[8]={(float)s.left,mx,(float)s.right,(float)s.right,(float)s.right,mx,(float)s.left,(float)s.left};
+    float py[8]={(float)s.top,(float)s.top,(float)s.top,my,(float)s.bottom,(float)s.bottom,(float)s.bottom,my};
+    float r=9*UI; for(int i=0;i<8;i++){ float dx=x-px[i],dy=y-py[i]; if(dx*dx+dy*dy<=r*r) return i; } return -1; }
+static bool SelBorderHit(int x,int y){ RECT s=g_sel; float b=6*UI;
+    bool nearX=(fabsf((float)x-s.left)<=b||fabsf((float)x-s.right)<=b), nearY=(fabsf((float)y-s.top)<=b||fabsf((float)y-s.bottom)<=b);
+    bool inX=(x>=s.left-b&&x<=s.right+b), inY=(y>=s.top-b&&y<=s.bottom+b); return (nearX&&inY)||(nearY&&inX); }
+static int FontMenuLayout(RECT& panel, std::vector<RECT>& rows){
+    rows.clear(); if(g_fontBtn.right<=g_fontBtn.left) return 0;
+    int nf=(int)g_fontNames.size(), total=nf+2;
+    float rowH=26*UI, pad=4*UI, w=max((float)(g_fontBtn.right-g_fontBtn.left),150.0f*UI);
+    float x=(float)g_fontBtn.left, H=total*rowH+pad*2, top=(float)g_fontBtn.bottom+6*UI;
+    if(top+H>g_vh-6){ top=(float)g_fontBtn.top-H-6*UI; if(top<6) top=6; }
+    panel={(LONG)x,(LONG)top,(LONG)(x+w),(LONG)(top+H)};
+    float ry=top+pad; for(int i=0;i<total;i++){ rows.push_back({(LONG)(x+3*UI),(LONG)ry,(LONG)(x+w-3*UI),(LONG)(ry+rowH)}); ry+=rowH; }
+    return total;
+}
 
 // ---------- 绘制工具栏（苹果液态玻璃）----------
 static void PaintPill(const RECT& r, ID2D1SolidColorBrush* br){
@@ -539,16 +638,23 @@ static void PaintIcon(const Btn& b, ID2D1SolidColorBrush* br){
 static void DrawMagnifier(int cx,int cy, ID2D1SolidColorBrush* br){
     const int Z=(int)(8*UI), half=8, n=2*half+1, D=n*Z;
     float lh=18*UI, phH=8+3*lh;   // 三行信息，行距按字体行高（小一号字体）
-    float ox=cx+20, oy=cy+20;
-    if(ox+D>g_vw) ox=cx-20-D; if(oy+D+phH>g_vh) oy=cy-20-(D+phH);
+    float off=28;                                    // 让放大镜避开光标，不与取色框重叠
+    float ox=cx+off, oy=cy+off;
+    if(ox+D>g_vw) ox=cx-off-D; if(oy+D+phH>g_vh) oy=cy-off-(D+phH);
     g_rt->DrawBitmap(g_shot, D2D1::RectF(ox,oy,ox+D,oy+D),1.0f,
         D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
         D2D1::RectF((float)(cx-half),(float)(cy-half),(float)(cx+half+1),(float)(cy+half+1)));
-    br->SetColor(Col(19,192,96));
-    float mid=ox+half*Z+Z/2.0f;
-    for(float a=oy;a<oy+D;a+=6) g_rt->DrawLine(D2D1::Point2F(mid,a),D2D1::Point2F(mid,a+3),br,UI);
-    for(float a=ox;a<ox+D;a+=6) g_rt->DrawLine(D2D1::Point2F(a,oy+half*Z+Z/2.0f),D2D1::Point2F(a+3,oy+half*Z+Z/2.0f),br,UI);
-    g_rt->DrawRectangle(D2D1::RectF(ox+half*Z,oy+half*Z,ox+half*Z+Z,oy+half*Z+Z),br,2.0f);
+    float mid=ox+half*Z+Z/2.0f, midY=oy+half*Z+Z/2.0f;
+    // 十字准星：白色描边 + 品红芯，任意背景(浅/深/灰/彩)都清晰
+    br->SetColor(D2D1::ColorF(1,1,1,0.95f));
+    g_rt->DrawLine(D2D1::Point2F(mid,(float)oy),D2D1::Point2F(mid,(float)(oy+D)),br,3.0f*UI);
+    g_rt->DrawLine(D2D1::Point2F((float)ox,midY),D2D1::Point2F((float)(ox+D),midY),br,3.0f*UI);
+    br->SetColor(Col(255,45,60));
+    g_rt->DrawLine(D2D1::Point2F(mid,(float)oy),D2D1::Point2F(mid,(float)(oy+D)),br,1.3f*UI);
+    g_rt->DrawLine(D2D1::Point2F((float)ox,midY),D2D1::Point2F((float)(ox+D),midY),br,1.3f*UI);
+    D2D1_RECT_F cxr=D2D1::RectF(ox+half*Z,oy+half*Z,ox+half*Z+Z,oy+half*Z+Z);
+    br->SetColor(D2D1::ColorF(1,1,1,0.95f)); g_rt->DrawRectangle(cxr,br,3.0f);
+    br->SetColor(Col(255,45,60)); g_rt->DrawRectangle(cxr,br,1.5f);
     br->SetColor(Col(255,255,255)); g_rt->DrawRectangle(D2D1::RectF(ox,oy,ox+D,oy+D),br,2.0f*UI);
     int r,g,b; GetPixel(cx,cy,r,g,b);
     br->SetColor(Col(245,246,248)); g_rt->FillRectangle(D2D1::RectF(ox,oy+D,ox+D,oy+D+phH),br);
@@ -637,6 +743,12 @@ static void Render(HWND hwnd){
             }
         }
         br->SetColor(Col(19,192,96)); g_rt->DrawRectangle(selr,br,2.0f);
+        // 选区可调手柄（未选工具时显示，可拖动缩放/移动整框）
+        if(g_mode==EDIT && g_tool==-1){ RECT s=g_sel; float mx=(s.left+s.right)/2.0f,my=(s.top+s.bottom)/2.0f, hs=4.0f*UI;
+            float px[8]={(float)s.left,mx,(float)s.right,(float)s.right,(float)s.right,mx,(float)s.left,(float)s.left};
+            float py[8]={(float)s.top,(float)s.top,(float)s.top,my,(float)s.bottom,(float)s.bottom,(float)s.bottom,my};
+            for(int i=0;i<8;i++){ D2D1_RECT_F hr=D2D1::RectF(px[i]-hs,py[i]-hs,px[i]+hs,py[i]+hs);
+                br->SetColor(Col(255,255,255)); g_rt->FillRectangle(hr,br); br->SetColor(Col(19,192,96)); g_rt->DrawRectangle(hr,br,1.4f); } }
         // 旋转角度实时读数（右侧）
         if(g_dragMode==2 && g_rotIdx>=0 && g_rotIdx<(int)g_annos.size()){
             float deg=g_annos[g_rotIdx].rot*57.2958f; deg=fmodf(deg,360.0f); if(deg>180)deg-=360; if(deg<-180)deg+=360;
@@ -681,7 +793,27 @@ static void Render(HWND hwnd){
                 }
                 for(auto&sw:g_colSw){ D2D1_RECT_F r=D2D1::RectF(sw.rc.left+6,sw.rc.top+6,sw.rc.right-6,sw.rc.bottom-6); br->SetColor(PALETTE[sw.idx]); g_rt->FillRoundedRectangle(D2D1::RoundedRect(r,4,4),br); if(sw.idx==g_colorIdx){ br->SetColor(Col(19,192,96)); g_rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(sw.rc.left+3,sw.rc.top+3,sw.rc.right-3,sw.rc.bottom-3),6,6),br,2.0f); } }
                 for(auto&sw:g_shpSw){ float cx=(sw.rc.left+sw.rc.right)/2.0f, cy=(sw.rc.top+sw.rc.bottom)/2.0f, s=10*UI; br->SetColor(sw.idx==g_mshape?Col(19,192,96):Col(120,126,132)); if(sw.idx==0) g_rt->DrawRectangle(D2D1::RectF(cx-s,cy-s,cx+s,cy+s),br,2.0f); else g_rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx,cy),s,s),br,2.0f); }
-                if(g_fontBtn.right>g_fontBtn.left){ br->SetColor(Col(65,70,75)); std::wstring fn=std::wstring(FONT_NAME[g_fontIdx])+L" ▾"; g_rt->DrawText(fn.c_str(),(UINT32)fn.size(),g_tf,D2D1::RectF(g_fontBtn.left,g_fontBtn.top-4,g_fontBtn.right,g_fontBtn.bottom+4),br); }
+                if(g_fontBtn.right>g_fontBtn.left){ br->SetColor(Col(70,75,80));
+                    std::wstring fn=(g_fontIdx<(int)g_fontNames.size()?g_fontNames[g_fontIdx]:std::wstring(L"(无字体)"))+L"  ▾";
+                    IDWriteTextFormat* mf=g_tfMenu?g_tfMenu:g_tfSmall;
+                    g_rt->DrawText(fn.c_str(),(UINT32)fn.size(),mf,D2D1::RectF(g_fontBtn.left,g_fontBtn.top,g_fontBtn.right,g_fontBtn.bottom),br); }
+            }
+            // 字体下拉菜单（字体列表 + 安装 + 卸载）
+            if(g_tool==5 && g_fontMenu){ RECT panel; std::vector<RECT> rows; int tot=FontMenuLayout(panel,rows); int nf=(int)g_fontNames.size();
+                IDWriteTextFormat* mf=g_tfMenu?g_tfMenu:g_tfSmall;
+                D2D1_ROUNDED_RECT pr=D2D1::RoundedRect(D2D1::RectF(panel.left,panel.top,panel.right,panel.bottom),10,10);
+                br->SetColor(D2D1::ColorF(0,0,0,0.12f)); g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(panel.left-1,panel.top+2,panel.right+1,panel.bottom+3),11,11),br);
+                br->SetColor(Col(255,255,255)); g_rt->FillRoundedRectangle(pr,br);
+                br->SetColor(Col(210,214,219)); g_rt->DrawRoundedRectangle(pr,br,1.0f);
+                for(int i=0;i<tot;i++){ RECT r=rows[i]; bool hov=PtIn(r,g_cursor.x,g_cursor.y);
+                    if(hov){ br->SetColor(Col(235,244,238)); g_rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left,r.top,r.right,r.bottom),6,6),br); }
+                    D2D1_COLOR_F tc=Col(60,64,69); std::wstring s;
+                    if(i<nf){ s=g_fontNames[i]; if(i==g_fontIdx){ tc=Col(19,150,80); s=L"● "+s; } else s=L"   "+s; }
+                    else if(i==nf) { s=L"＋  安装字体…"; tc=Col(19,150,80); }
+                    else           { s=L"－  卸载当前字体"; tc=Col(190,70,70); }
+                    br->SetColor(tc); g_rt->DrawText(s.c_str(),(UINT32)s.size(),mf,D2D1::RectF(r.left+8*UI,r.top,r.right-6*UI,r.bottom),br);
+                }
+                if(nf>=0 && nf<tot){ br->SetColor(Col(228,231,235)); float sy=(float)rows[nf].top-1; g_rt->DrawLine(D2D1::Point2F(panel.left+8,sy),D2D1::Point2F(panel.right-8,sy),br,1.0f); }
             }
             // 悬停名称气泡
             if(g_hoverBtn>=0 && g_hoverBtn<(int)g_btns.size()){
@@ -801,7 +933,7 @@ static void EnterEdit(){ g_mode=EDIT; LayoutToolbar(); }
 
 static bool HandleBarClick(HWND hwnd,int x,int y){
     for(auto&b:g_btns){ if(PtIn(b.rc,x,y)){
-        if(b.kind==0){ g_tool=(g_tool==b.id?-1:b.id); LayoutToolbar(); }
+        if(b.kind==0){ g_tool=(g_tool==b.id?-1:b.id); g_fontMenu=false; LayoutToolbar(); }
         else if(b.kind==1){ if(!g_annos.empty()){ g_annos.pop_back(); if(g_selArrow>=(int)g_annos.size()) g_selArrow=-1; } }
         else if(b.kind==4){ CommitText(); SavePng(hwnd); }
         else if(b.kind==2){ PostQuitMessage(0); }
@@ -810,7 +942,7 @@ static bool HandleBarClick(HWND hwnd,int x,int y){
     for(auto&sw:g_lvlSw){ if(PtIn(sw.rc,x,y)){ g_level=sw.idx; return true; } }
     for(auto&sw:g_colSw){ if(PtIn(sw.rc,x,y)){ g_colorIdx=sw.idx; if(g_selIdx>=0&&g_annos[g_selIdx].type!=4) g_annos[g_selIdx].color=sw.idx; return true; } }
     for(auto&sw:g_shpSw){ if(PtIn(sw.rc,x,y)){ g_mshape=sw.idx; return true; } }
-    if(g_fontBtn.right>g_fontBtn.left && PtIn(g_fontBtn,x,y)){ g_fontIdx=(g_fontIdx+1)%2; if(g_selIdx>=0&&g_annos[g_selIdx].type==5) g_annos[g_selIdx].fontIdx=g_fontIdx; return true; }
+    if(g_fontBtn.right>g_fontBtn.left && PtIn(g_fontBtn,x,y)){ g_fontMenu=!g_fontMenu; return true; }
     return false;
 }
 static bool NearArrowDot(int x,int y){
@@ -952,12 +1084,47 @@ static void CommitText(){
     if(!empty){ Anno a; a.type=5; a.x0=(float)g_typePos.x; a.y0=(float)g_typePos.y; a.color=g_typeColor; a.fontIdx=g_typeFont; a.fontSize=g_typeSize; a.text=s; g_annos.push_back(a); g_selIdx=(int)g_annos.size()-1; }
 }
 static void SendPasteLater(){ Sleep(180); INPUT in[4]={}; for(int i=0;i<4;i++) in[i].type=INPUT_KEYBOARD; in[0].ki.wVk=VK_CONTROL; in[1].ki.wVk='V'; in[2].ki.wVk='V'; in[2].ki.dwFlags=KEYEVENTF_KEYUP; in[3].ki.wVk=VK_CONTROL; in[3].ki.dwFlags=KEYEVENTF_KEYUP; SendInput(4,in,sizeof(INPUT)); }
+static HCURSOR MakeCursorFromPng(const std::wstring& path,int size){
+    IWICBitmapDecoder* dec=nullptr; if(FAILED(g_wic->CreateDecoderFromFilename(path.c_str(),nullptr,GENERIC_READ,WICDecodeMetadataCacheOnLoad,&dec))||!dec) return nullptr;
+    IWICBitmapFrameDecode* fr=nullptr; dec->GetFrame(0,&fr);
+    IWICFormatConverter* conv=nullptr; g_wic->CreateFormatConverter(&conv); conv->Initialize(fr,GUID_WICPixelFormat32bppBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom);
+    int S=4, hi=size*S;                                     // 4x 超采样，描边后再下采样 → 更细腻的抗锯齿
+    IWICBitmapScaler* sc=nullptr; g_wic->CreateBitmapScaler(&sc); sc->Initialize(conv,hi,hi,WICBitmapInterpolationModeFant);
+    std::vector<BYTE> px((size_t)hi*hi*4,0); sc->CopyPixels(nullptr,hi*4,(UINT)px.size(),px.data());
+    std::vector<BYTE> big=px; int rb=S, rw=S*2;
+    for(int y=0;y<hi;y++)for(int x=0;x<hi;x++){ if(px[((size_t)y*hi+x)*4+3]>40) continue;
+        int md=99; for(int dy=-rw;dy<=rw;dy++)for(int dx=-rw;dx<=rw;dx++){ int nx=x+dx,ny=y+dy; if(nx<0||ny<0||nx>=hi||ny>=hi)continue; if(px[((size_t)ny*hi+nx)*4+3]>120){ int d=max(abs(dx),abs(dy)); if(d<md)md=d; } }
+        BYTE* o=&big[((size_t)y*hi+x)*4]; if(md<=rb){ o[0]=o[1]=o[2]=20; o[3]=255; } else if(md<=rw){ o[0]=o[1]=o[2]=255; o[3]=255; } }
+    std::vector<BYTE> out((size_t)size*size*4,0); int SS=S*S;
+    for(int oy=0;oy<size;oy++)for(int ox=0;ox<size;ox++){ long pa=0,pr=0,pg=0,pb=0;
+        for(int j=0;j<S;j++)for(int i=0;i<S;i++){ BYTE* s=&big[(((size_t)(oy*S+j))*hi+(ox*S+i))*4]; int a=s[3]; pa+=a; pb+=(long)s[0]*a; pg+=(long)s[1]*a; pr+=(long)s[2]*a; }
+        BYTE* o=&out[((size_t)oy*size+ox)*4]; o[3]=(BYTE)(pa/SS); if(pa>0){ o[0]=(BYTE)(pb/pa); o[1]=(BYTE)(pg/pa); o[2]=(BYTE)(pr/pa); } }
+    BITMAPV5HEADER bi; ZeroMemory(&bi,sizeof(bi)); bi.bV5Size=sizeof(bi); bi.bV5Width=size; bi.bV5Height=-size; bi.bV5Planes=1; bi.bV5BitCount=32; bi.bV5Compression=BI_BITFIELDS; bi.bV5RedMask=0x00FF0000; bi.bV5GreenMask=0x0000FF00; bi.bV5BlueMask=0x000000FF; bi.bV5AlphaMask=0xFF000000;
+    HDC hdc=GetDC(nullptr); void* bits=nullptr; HBITMAP color=CreateDIBSection(hdc,(BITMAPINFO*)&bi,DIB_RGB_COLORS,&bits,nullptr,0); ReleaseDC(nullptr,hdc);
+    if(color&&bits) memcpy(bits,out.data(),out.size());
+    HBITMAP mask=CreateBitmap(size,size,1,1,nullptr);
+    int hx=size/2,hy=size/2,best=0x7fffffff;
+    for(int y=0;y<hi;y++)for(int x=0;x<hi;x++) if(px[((size_t)y*hi+x)*4+3]>120){ int scr=y*16384+x; if(scr<best){best=scr;hx=x/S;hy=y/S;} }
+    ICONINFO ii; ZeroMemory(&ii,sizeof(ii)); ii.fIcon=FALSE; ii.xHotspot=hx; ii.yHotspot=hy; ii.hbmMask=mask; ii.hbmColor=color;
+    HCURSOR cur=CreateIconIndirect(&ii);
+    if(color)DeleteObject(color); if(mask)DeleteObject(mask);
+    SafeRelease(&sc); SafeRelease(&conv); SafeRelease(&fr); SafeRelease(&dec);
+    return cur;
+}
 
 LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
     switch(msg){
     case WM_MOUSEMOVE:{
         g_cursor.x=GET_X_LPARAM(lParam); g_cursor.y=GET_Y_LPARAM(lParam);
         if(g_sliding){ SetSizeFromSlider(g_cursor.x); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
+        if(g_selRz>=0){ int hx=max(0,min((int)g_cursor.x,g_vw)),hy=max(0,min((int)g_cursor.y,g_vh)); RECT&s=g_sel; int i=g_selRz;
+            if(i==0){ s.left=min(hx,(int)s.right-20); s.top=min(hy,(int)s.bottom-20);} else if(i==2){ s.right=max(hx,(int)s.left+20); s.top=min(hy,(int)s.bottom-20);}
+            else if(i==4){ s.right=max(hx,(int)s.left+20); s.bottom=max(hy,(int)s.top+20);} else if(i==6){ s.left=min(hx,(int)s.right-20); s.bottom=max(hy,(int)s.top+20);}
+            else if(i==1){ s.top=min(hy,(int)s.bottom-20);} else if(i==3){ s.right=max(hx,(int)s.left+20);} else if(i==5){ s.bottom=max(hy,(int)s.top+20);} else if(i==7){ s.left=min(hx,(int)s.right-20);}
+            LayoutToolbar(); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
+        if(g_selMv){ int dx=g_cursor.x-g_moveLast.x, dy=g_cursor.y-g_moveLast.y; RECT&s=g_sel;
+            dx=max(-(int)s.left,min(dx,g_vw-(int)s.right)); dy=max(-(int)s.top,min(dy,g_vh-(int)s.bottom));
+            s.left+=dx;s.right+=dx;s.top+=dy;s.bottom+=dy; g_moveLast=g_cursor; LayoutToolbar(); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
         if(g_selecting){ g_sel.left=min((LONG)g_start.x,(LONG)g_cursor.x); g_sel.top=min((LONG)g_start.y,(LONG)g_cursor.y); g_sel.right=max((LONG)g_start.x,(LONG)g_cursor.x); g_sel.bottom=max((LONG)g_start.y,(LONG)g_cursor.y); }
         else if(g_dragMode==1 && g_selArrow>=0){ Anno&a=g_annos[g_selArrow]; float mx=(float)g_cursor.x,my=(float)g_cursor.y; ClampSel(mx,my); a.hasCtrl=true; a.cx=2*mx-0.5f*(a.x0+a.x1); a.cy=2*my-0.5f*(a.y0+a.y1); }
         else if(g_dragMode==2 && g_rotIdx>=0 && g_rotIdx<(int)g_annos.size() && g_annos[g_rotIdx].type==5){ // 文字旋转
@@ -990,6 +1157,12 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
         int x=g_cursor.x,y=g_cursor.y;
         if(g_mode==SEL){ g_start=g_cursor; g_selecting=true; g_sel={x,y,x,y}; SetCapture(hwnd); }
         else {
+            if(g_tool==5 && g_fontMenu){ RECT panel; std::vector<RECT> rows; int tot=FontMenuLayout(panel,rows); int nf=(int)g_fontNames.size(); bool hit=false;
+                for(int i=0;i<tot;i++) if(PtIn(rows[i],x,y)){ hit=true;
+                    if(i<nf){ g_fontIdx=i; if(g_selIdx>=0&&g_selIdx<(int)g_annos.size()&&g_annos[g_selIdx].type==5) g_annos[g_selIdx].fontIdx=i; g_fontMenu=false; }
+                    else if(i==nf){ g_fontMenu=false; InstallFont(hwnd); } else { g_fontMenu=false; UninstallFont(hwnd); } break; }
+                if(!hit) g_fontMenu=false;
+                InvalidateRect(hwnd,nullptr,FALSE); return 0; }
             bool onSlider=(g_sizeSlider.right>g_sizeSlider.left && PtIn(g_sizeSlider,x,y));
             if(onSlider){ g_sliding=true; SetSizeFromSlider(x); SetCapture(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
             if(g_typing){ CommitText(); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
@@ -1000,6 +1173,11 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
                 InvalidateRect(hwnd,nullptr,FALSE); return 0; }
             // 选中箭头的首/尾节点：直接拖动该端点（可再吸附到别的要素节点）
             { int ae=ArrowEndAt(x,y); if(ae>=0){ g_dragMode=4; g_arrowEnd=ae; g_selIdx=g_selArrow; SetCapture(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0; } }
+            // 未选任何工具时(首次框选后的调整阶段)：拖选区手柄=缩放，拖选区边=移动整个选区
+            if(g_tool==-1 && !PtIn(g_barRc,x,y) && !(g_subRc.right>g_subRc.left&&PtIn(g_subRc,x,y)) && AnnoAt(x,y)<0){
+                int sh2=SelHandleAt(x,y); if(sh2>=0){ g_selRz=sh2; SetCapture(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0; }
+                if(PtIn(g_sel,x,y)||SelBorderHit(x,y)){ g_selMv=true; g_moveLast=g_cursor; SetCapture(hwnd); InvalidateRect(hwnd,nullptr,FALSE); return 0; } // 框内任意处都可移动整框
+            }
             if(NearRotate(x,y)){ // 文字旋转
                 Anno&a=g_annos[g_rotIdx]; float l,t,r,b; AnnoBBox(a,l,t,r,b); g_rotCx=(l+r)/2; g_rotCy=(t+b)/2;
                 g_rotStart=atan2f((float)y-g_rotCy,(float)x-g_rotCx); g_rotBaseAngle=a.rot; g_dragMode=2; SetCapture(hwnd);
@@ -1039,6 +1217,8 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
     case WM_LBUTTONUP:{
         ReleaseCapture();
         if(g_sliding){ g_sliding=false; InvalidateRect(hwnd,nullptr,FALSE); return 0; }
+        if(g_selRz>=0){ g_selRz=-1; InvalidateRect(hwnd,nullptr,FALSE); return 0; }
+        if(g_selMv){ g_selMv=false; InvalidateRect(hwnd,nullptr,FALSE); return 0; }
         if(g_mode==SEL && g_selecting){ g_selecting=false;
             if(g_sel.right-g_sel.left<8||g_sel.bottom-g_sel.top<8){ if(g_haveSnap){ g_sel=g_snap; EnterEdit(); } }
             else EnterEdit();
@@ -1084,9 +1264,11 @@ LRESULT CALLBACK WndProc(HWND hwnd,UINT msg,WPARAM wParam,LPARAM lParam){
     case WM_SETCURSOR:
         if(LOWORD(lParam)==HTCLIENT){
             POINT p; GetCursorPos(&p); ScreenToClient(hwnd,&p);
-            LPCSTR c=IDC_CROSS;
+            LPCSTR c=IDC_ARROW;
             if(g_mode==EDIT){
                 if(PtIn(g_barRc,p.x,p.y)||(g_subRc.right>g_subRc.left&&PtIn(g_subRc,p.x,p.y))) c=IDC_ARROW;
+                else if(g_selRz>=0||g_selMv) c=IDC_ARROW;
+                else if(g_tool==-1) c=IDC_ARROW;
                 else if(g_moving||(!g_typing&&AnnoAt(p.x,p.y)>=0)) c=IDC_SIZEALL;
                 else if(g_tool>=0) c=IDC_ARROW;   // 选了工具 → 箭头
             }
@@ -1116,15 +1298,20 @@ int WINAPI WinMain(HINSTANCE hInst,HINSTANCE,LPSTR,int){
     RegisterFonts();
     CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&g_wic));
     LoadIcons();
+    // 使用系统光标(标准箭头指针)，不加载自定义光标
     g_dwrite->CreateTextFormat(L"Microsoft YaHei",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,14.0f*UI,L"zh-cn",&g_tf);
     g_dwrite->CreateTextFormat(L"Microsoft YaHei",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,11.5f*UI,L"zh-cn",&g_tfSmall);
     g_dwrite->CreateTextFormat(L"Microsoft YaHei",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,15.0f*UI,L"zh-cn",&g_tfHint);
     g_tfHint->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     g_dwrite->CreateTextFormat(L"Segoe UI Symbol",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,20.0f*UI,L"en-us",&g_tfIcon);
     g_tfIcon->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER); g_tfIcon->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    g_dwrite->CreateTextFormat(L"Microsoft YaHei",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,12.0f*UI,L"zh-cn",&g_tfMenu);
+    if(g_tfMenu) g_tfMenu->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-    WNDCLASSEXW wc; ZeroMemory(&wc,sizeof(wc)); wc.cbSize=sizeof(wc); wc.style=CS_DBLCLKS; wc.lpfnWndProc=WndProc; wc.hInstance=hInst; wc.hCursor=LoadCursor(nullptr,IDC_CROSS); wc.lpszClassName=L"TatoMarkD2D"; RegisterClassExW(&wc);
+    HICON hAppIco=(HICON)LoadImageW(hInst,MAKEINTRESOURCEW(1),IMAGE_ICON,0,0,LR_DEFAULTSIZE|LR_SHARED);
+    WNDCLASSEXW wc; ZeroMemory(&wc,sizeof(wc)); wc.cbSize=sizeof(wc); wc.style=CS_DBLCLKS; wc.lpfnWndProc=WndProc; wc.hInstance=hInst; wc.hCursor=LoadCursor(nullptr,IDC_ARROW); wc.hIcon=hAppIco; wc.hIconSm=hAppIco; wc.lpszClassName=L"TatoMarkD2D"; RegisterClassExW(&wc);
     HWND hwnd=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,wc.lpszClassName,L"TatoMark",WS_POPUP,g_vx,g_vy,g_vw,g_vh,nullptr,nullptr,hInst,nullptr);
+    if(hAppIco){ SendMessageW(hwnd,WM_SETICON,ICON_BIG,(LPARAM)hAppIco); SendMessageW(hwnd,WM_SETICON,ICON_SMALL,(LPARAM)hAppIco); }
     ShowWindow(hwnd,SW_SHOW); SetForegroundWindow(hwnd); SetFocus(hwnd);
     SetTimer(hwnd,1,300,nullptr);   // 文字输入光标闪烁
     MSG msg; while(GetMessage(&msg,nullptr,0,0)){ TranslateMessage(&msg); DispatchMessage(&msg); }
